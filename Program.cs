@@ -235,7 +235,7 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
 
         Add(saleCommand, "$invoice", invoice);
         Add(saleCommand, "$customer",
-            input.CustomerId.HasValue ? input.CustomerId.Value : DBNull.Value);
+            input.CustomerId.HasValue ? (object)input.CustomerId.Value : DBNull.Value);
         Add(saleCommand, "$subtotal", subtotal);
         Add(saleCommand, "$discount", discount);
         Add(saleCommand, "$total", total);
