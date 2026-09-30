@@ -493,7 +493,7 @@ async Task<string> ProductsPage()
                 <td>{Money(row["selling_price"])}</td>
                 <td><span class='stock {(Convert.ToInt32(row["stock_qty"]) <= Convert.ToInt32(row["low_stock_level"]) ? "low" : "")}'>{row["stock_qty"]}</span></td>
                 <td>
-                  <form method='post' action='/products/delete' onsubmit='return confirm("Delete this product?")'>
+                  <form method='post' action='/products/delete' onsubmit='return confirm(''Delete this product?'')'>
                     <input type='hidden' name='id' value='{row["id"]}'>
                     <button class='link danger' type='submit'>Delete</button>
                   </form>
