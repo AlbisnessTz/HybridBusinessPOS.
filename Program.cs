@@ -35,10 +35,10 @@ app.MapPost("/products", async (HttpRequest request) =>
                 string.IsNullOrWhiteSpace(form["category"])
                     ? "General"
                     : form["category"].ToString().Trim());
-            Add(command, "$buying", ParseMoney(form["buying_price"]));
-            Add(command, "$selling", ParseMoney(form["selling_price"]));
-            Add(command, "$stock", Math.Max(0, ParseInt(form["stock_qty"])));
-            Add(command, "$low", Math.Max(1, ParseInt(form["low_stock_level"], 5)));
+            Add(command, "$buying", ParseFormMoney(form["buying_price"]));
+            Add(command, "$selling", ParseFormMoney(form["selling_price"]));
+            Add(command, "$stock", Math.Max(0, ParseFormInt(form["stock_qty"])));
+            Add(command, "$low", Math.Max(1, ParseFormInt(form["low_stock_level"], 5)));
             Add(command, "$created", DateTime.UtcNow.ToString("O"));
         });
 
@@ -48,8 +48,8 @@ app.MapPost("/products", async (HttpRequest request) =>
 app.MapPost("/products/adjust", async (HttpRequest request) =>
 {
     var form = await request.ReadFormAsync();
-    var productId = ParseInt(form["product_id"]);
-    var quantity = ParseInt(form["quantity"]);
+    var productId = ParseFormInt(form["product_id"]);
+    var quantity = ParseFormInt(form["quantity"]);
     var mode = form["mode"].ToString();
 
     if (productId <= 0 || quantity <= 0)
@@ -71,7 +71,7 @@ app.MapPost("/products/adjust", async (HttpRequest request) =>
 app.MapPost("/products/delete", async (HttpRequest request) =>
 {
     var form = await request.ReadFormAsync();
-    var id = ParseInt(form["id"]);
+    var id = ParseFormInt(form["id"]);
 
     if (id > 0)
         await ExecuteAsync(
@@ -113,7 +113,7 @@ app.MapPost("/expenses", async (HttpRequest request) =>
         ? "General"
         : form["category"].ToString().Trim();
     var description = form["description"].ToString().Trim();
-    var amount = ParseMoney(form["amount"]);
+    var amount = ParseFormMoney(form["amount"]);
 
     if (amount <= 0)
         return Results.BadRequest("Expense amount must be greater than zero.");
@@ -176,7 +176,7 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
 
     await using var connection = new SqliteConnection(ConnectionString());
     await connection.OpenAsync();
-    await using var transaction = await connection.BeginTransactionAsync();
+    await using var transaction = connection.BeginTransaction();
 
     try
     {
@@ -837,7 +837,7 @@ int ParseInt(string value, int fallback = 0)
         ? number
         : fallback;
 
-int ParseInt(Microsoft.Extensions.Primitives.StringValues value, int fallback = 0)
+int ParseFormInt(Microsoft.Extensions.Primitives.StringValues value, int fallback = 0)
     => ParseInt(value.ToString(), fallback);
 
 double ParseMoney(string value)
@@ -845,7 +845,7 @@ double ParseMoney(string value)
         ? number
         : 0d;
 
-double ParseMoney(Microsoft.Extensions.Primitives.StringValues value)
+double ParseFormMoney(Microsoft.Extensions.Primitives.StringValues value)
     => ParseMoney(value.ToString());
 
 string E(object? value)
