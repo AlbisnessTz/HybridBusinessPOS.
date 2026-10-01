@@ -398,7 +398,9 @@ async Task<string> DashboardPage()
     var products = (await QueryAsync(@"
         SELECT
             COUNT(*) products,
-            COALESCE(SUM(selling_price * stock_qty),0) stock_value,
+            COALESCE(SUM(buying_price * stock_qty),0) stock_cost_value,
+            COALESCE(SUM(selling_price * stock_qty),0) stock_sales_value,
+            COALESCE(SUM((selling_price - buying_price) * stock_qty),0) potential_profit,
             COALESCE(SUM(CASE WHEN stock_qty <= low_stock_level THEN 1 ELSE 0 END),0) low_stock
         FROM products"))[0];
 
@@ -450,7 +452,9 @@ async Task<string> DashboardPage()
       <div class='cards'>
         <div class='card'><span>Today's Sales</span><strong>{Money(salesToday["total"])}</strong><small>{salesToday["count"]} transactions</small></div>
         <div class='card'><span>Products</span><strong>{products["products"]}</strong><small>catalogue items</small></div>
-        <div class='card'><span>Stock Value</span><strong>{Money(products["stock_value"])}</strong><small>at selling price</small></div>
+        <div class='card'><span>Stock Cost</span><strong>{Money(products["stock_cost_value"])}</strong><small>at buying price</small></div>
+        <div class='card'><span>Stock Sales Value</span><strong>{Money(products["stock_sales_value"])}</strong><small>at selling price</small></div>
+        <div class='card'><span>Potential Profit</span><strong>{Money(products["potential_profit"])}</strong><small>on current stock</small></div>
         <div class='card'><span>Today's Expenses</span><strong>{Money(expenses["total"])}</strong><small>recorded expenses</small></div>
       </div>
 
