@@ -1,4 +1,5 @@
 using Microsoft.Data.Sqlite;
+using System.Collections.Concurrent;
 using System.Globalization;
 using System.Net;
 using System.Security.Claims;
@@ -18,18 +19,54 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
         options.Cookie.Name = "SheehanLights.Auth";
         options.Cookie.HttpOnly = true;
         options.Cookie.SameSite = SameSiteMode.Lax;
-        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        options.Cookie.SecurePolicy = builder.Environment.IsDevelopment()
+            ? CookieSecurePolicy.SameAsRequest
+            : CookieSecurePolicy.Always;
         options.ExpireTimeSpan = TimeSpan.FromHours(8);
         options.SlidingExpiration = true;
     });
 
 builder.Services.AddAuthorization();
 var app = builder.Build();
+
+var loginThrottle = new ConcurrentDictionary<string, LoginAttemptState>();
 var httpContextAccessor = app.Services.GetRequiredService<IHttpContextAccessor>();
 
 app.UseStaticFiles();
+
+app.Use(async (context, next) =>
+{
+    context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+    context.Response.Headers["X-Frame-Options"] = "DENY";
+    context.Response.Headers["Referrer-Policy"] = "strict-origin-when-cross-origin";
+    context.Response.Headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=()";
+    await next();
+});
+
 app.UseAuthentication();
 app.UseAuthorization();
+
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path;
+
+    if ((HttpMethods.IsPost(context.Request.Method) ||
+         HttpMethods.IsPut(context.Request.Method) ||
+         HttpMethods.IsPatch(context.Request.Method) ||
+         HttpMethods.IsDelete(context.Request.Method)) &&
+        !path.StartsWithSegments("/login") &&
+        !path.StartsWithSegments("/forbidden"))
+    {
+        if (!IsSameOriginRequest(context))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            await context.Response.WriteAsJsonAsync(new { message = "Cross-site request blocked." });
+            return;
+        }
+    }
+
+    await next();
+});
 
 app.Use(async (context, next) =>
 {
@@ -56,6 +93,22 @@ app.Use(async (context, next) =>
         return;
     }
 
+    var userIdValue = context.User.FindFirstValue(ClaimTypes.NameIdentifier);
+    if (!int.TryParse(userIdValue, out var authenticatedUserId))
+    {
+        await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        context.Response.Redirect("/login?error=Please%20sign%20in%20again");
+        return;
+    }
+
+    var currentUser = await FindUserById(authenticatedUserId);
+    if (currentUser is null || !currentUser.Active)
+    {
+        await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+        context.Response.Redirect("/login?error=This%20account%20is%20disabled");
+        return;
+    }
+
     if (context.User.FindFirstValue("must_change_password") == "1" &&
         !path.StartsWithSegments("/account") &&
         !path.StartsWithSegments("/logout"))
@@ -69,6 +122,7 @@ app.Use(async (context, next) =>
 
 var dbPath = Path.Combine(app.Environment.ContentRootPath, "sheehan_lights.db");
 InitializeDatabase();
+CreateAutomaticBackup();
 string ConnectionString() => $"Data Source={dbPath}";
 
 app.MapGet("/", async (HttpContext context) =>
@@ -88,6 +142,10 @@ app.MapGet("/login", (HttpRequest request, HttpContext context) =>
 
 app.MapPost("/login", async (HttpRequest request, HttpContext context) =>
 {
+    var clientKey = context.Connection.RemoteIpAddress?.ToString() ?? "unknown";
+    if (!AllowLoginAttempt(clientKey))
+        return Results.Redirect("/login?error=Too%20many%20login%20attempts.%20Please%20wait%20a%20few%20minutes");
+
     var form = await request.ReadFormAsync();
     var username = form["username"].ToString().Trim();
     var password = form["password"].ToString();
@@ -105,6 +163,7 @@ app.MapPost("/login", async (HttpRequest request, HttpContext context) =>
 
     if (!VerifyPassword(password, user.PasswordHash))
     {
+        RegisterFailedLoginAttempt(clientKey);
         var nextFailed = user.FailedAttempts + 1;
         var lockedUntil = nextFailed >= 5
             ? DateTimeOffset.UtcNow.AddMinutes(10).ToString("O")
@@ -141,6 +200,14 @@ app.MapPost("/login", async (HttpRequest request, HttpContext context) =>
     await context.SignInAsync(
         CookieAuthenticationDefaults.AuthenticationScheme,
         new ClaimsPrincipal(identity));
+
+    ClearLoginAttempts(clientKey);
+
+    await AuditAsync(
+        "Successful Login",
+        "User",
+        user.Id,
+        $"Successful sign-in for {user.Username}");
 
     var returnUrl = form["returnUrl"].ToString();
     return string.IsNullOrWhiteSpace(returnUrl) || !returnUrl.StartsWith("/")
@@ -1757,6 +1824,102 @@ string NormalizePhone(string? value)
     return phone;
 }
 
+bool IsSameOriginRequest(HttpContext context)
+{
+    var origin = context.Request.Headers.Origin.ToString();
+
+    if (!string.IsNullOrWhiteSpace(origin))
+        return IsSameAuthority(origin, context.Request.Host.Value);
+
+    var referer = context.Request.Headers.Referer.ToString();
+
+    if (!string.IsNullOrWhiteSpace(referer))
+        return IsSameAuthority(referer, context.Request.Host.Value);
+
+    return false;
+}
+
+bool IsSameAuthority(string value, string expectedHost)
+{
+    if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
+        return false;
+
+    return string.Equals(uri.Authority, expectedHost, StringComparison.OrdinalIgnoreCase);
+}
+
+bool AllowLoginAttempt(string clientKey)
+{
+    var now = DateTimeOffset.UtcNow;
+    var state = loginThrottle.GetOrAdd(
+        clientKey,
+        _ => new LoginAttemptState(now, 0));
+
+    lock (state)
+    {
+        if (now - state.WindowStart >= TimeSpan.FromMinutes(10))
+        {
+            state.WindowStart = now;
+            state.Count = 0;
+        }
+
+        return state.Count < 10;
+    }
+}
+
+void RegisterFailedLoginAttempt(string clientKey)
+{
+    var state = loginThrottle.GetOrAdd(
+        clientKey,
+        _ => new LoginAttemptState(DateTimeOffset.UtcNow, 0));
+
+    lock (state)
+    {
+        state.Count++;
+    }
+}
+
+void ClearLoginAttempts(string clientKey)
+{
+    loginThrottle.TryRemove(clientKey, out _);
+}
+
+void CreateAutomaticBackup()
+{
+    try
+    {
+        if (!File.Exists(dbPath))
+            return;
+
+        var backupDirectory = Path.Combine(app.Environment.ContentRootPath, "backups");
+        Directory.CreateDirectory(backupDirectory);
+
+        var backupPath = Path.Combine(
+            backupDirectory,
+            $"sheehan_lights_{DateTime.Now:yyyyMMdd_HHmmss_fff}.db");
+
+        using var connection = new SqliteConnection(ConnectionString());
+        connection.Open();
+
+        using var command = connection.CreateCommand();
+        command.CommandText = "VACUUM INTO $path";
+        Add(command, "$path", backupPath);
+        command.ExecuteNonQuery();
+
+        var backups = new DirectoryInfo(backupDirectory)
+            .GetFiles("sheehan_lights_*.db")
+            .OrderByDescending(file => file.CreationTimeUtc)
+            .ToList();
+
+        foreach (var oldBackup in backups.Skip(14))
+        {
+            try { oldBackup.Delete(); } catch { }
+        }
+    }
+    catch
+    {
+    }
+}
+
 void InitializeDatabase()
 {
     using var connection = new SqliteConnection(ConnectionString());
@@ -2000,3 +2163,6 @@ record CheckoutLine(
     double BuyingPrice,
     double SellingPrice,
     double LineTotal);
+
+
+record LoginAttemptState(DateTimeOffset WindowStart, int Count);
