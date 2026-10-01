@@ -1,21 +1,181 @@
 using Microsoft.Data.Sqlite;
 using System.Globalization;
 using System.Net;
+using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Threading.RateLimiting;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authorization;
 
 var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddHttpContextAccessor();
+builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
+    .AddCookie(options =>
+    {
+        options.LoginPath = "/login";
+        options.AccessDeniedPath = "/forbidden";
+        options.Cookie.Name = "SheehanLights.Auth";
+        options.Cookie.HttpOnly = true;
+        options.Cookie.SameSite = SameSiteMode.Lax;
+        options.Cookie.SecurePolicy = CookieSecurePolicy.SameAsRequest;
+        options.ExpireTimeSpan = TimeSpan.FromHours(8);
+        options.SlidingExpiration = true;
+    });
+
+builder.Services.AddAuthorization();
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("login", limiter =>
+    {
+        limiter.PermitLimit = 5;
+        limiter.Window = TimeSpan.FromMinutes(1);
+        limiter.QueueLimit = 0;
+    });
+});
+
 var app = builder.Build();
+var httpContextAccessor = app.Services.GetRequiredService<IHttpContextAccessor>();
 
 app.UseStaticFiles();
+app.UseAuthentication();
+app.UseAuthorization();
+app.UseRateLimiter();
+
+app.Use(async (context, next) =>
+{
+    var path = context.Request.Path;
+
+    if (path.StartsWithSegments("/login") ||
+        path.StartsWithSegments("/forbidden"))
+    {
+        await next();
+        return;
+    }
+
+    if (context.User.Identity?.IsAuthenticated != true)
+    {
+        if (path.StartsWithSegments("/api"))
+        {
+            context.Response.StatusCode = StatusCodes.Status401Unauthorized;
+            await context.Response.WriteAsJsonAsync(new { message = "Authentication required." });
+            return;
+        }
+
+        var returnUrl = context.Request.PathBase + context.Request.Path + context.Request.QueryString;
+        context.Response.Redirect("/login?returnUrl=" + Uri.EscapeDataString(returnUrl));
+        return;
+    }
+
+    if (context.User.FindFirstValue("must_change_password") == "1" &&
+        !path.StartsWithSegments("/account") &&
+        !path.StartsWithSegments("/logout"))
+    {
+        context.Response.Redirect("/account?change=1");
+        return;
+    }
+
+    await next();
+});
 
 var dbPath = Path.Combine(app.Environment.ContentRootPath, "sheehan_lights.db");
 InitializeDatabase();
 string ConnectionString() => $"Data Source={dbPath}";
 
-app.MapGet("/", async () => Html("Dashboard", await DashboardPage(), "home"));
+app.MapGet("/", async (HttpContext context) =>
+{
+    var isOwner = context.User.IsInRole("Owner");
+    return Html("Dashboard", await DashboardPage(isOwner), "home");
+});
+
+app.MapGet("/login", (HttpRequest request, HttpContext context) =>
+{
+    if (context.User.Identity?.IsAuthenticated == true)
+        return Results.Redirect("/");
+
+    var error = request.Query["error"].ToString();
+    return Results.Content(LoginPage(error), "text/html");
+});
+
+app.MapPost("/login", async (HttpRequest request, HttpContext context) =>
+{
+    var form = await request.ReadFormAsync();
+    var username = form["username"].ToString().Trim();
+    var password = form["password"].ToString();
+
+    var user = await FindUser(username);
+
+    if (user is null)
+        return Results.Redirect("/login?error=Invalid%20username%20or%20password");
+
+    if (user.LockedUntil.HasValue && user.LockedUntil.Value > DateTimeOffset.UtcNow)
+        return Results.Redirect("/login?error=Account%20temporarily%20locked%20after%20too%20many%20failed%20attempts");
+
+    if (!user.Active)
+        return Results.Redirect("/login?error=This%20account%20is%20disabled");
+
+    if (!VerifyPassword(password, user.PasswordHash))
+    {
+        var nextFailed = user.FailedAttempts + 1;
+        var lockedUntil = nextFailed >= 5
+            ? DateTimeOffset.UtcNow.AddMinutes(10).ToString("O")
+            : null;
+
+        await ExecuteAsync(
+            "UPDATE users SET failed_attempts=$failed,locked_until=$locked WHERE id=$id",
+            command =>
+            {
+                Add(command, "$failed", nextFailed >= 5 ? 0 : nextFailed);
+                Add(command, "$locked", (object?)lockedUntil ?? DBNull.Value);
+                Add(command, "$id", user.Id);
+            });
+
+        return Results.Redirect("/login?error=Invalid%20username%20or%20password");
+    }
+
+    await ExecuteAsync(
+        "UPDATE users SET failed_attempts=0,locked_until=NULL WHERE id=$id",
+        command => Add(command, "$id", user.Id));
+
+    var claims = new List<Claim>
+    {
+        new(ClaimTypes.NameIdentifier, user.Id.ToString()),
+        new(ClaimTypes.Name, user.Username),
+        new(ClaimTypes.Role, user.Role),
+        new("must_change_password", user.MustChangePassword ? "1" : "0")
+    };
+
+    var identity = new ClaimsIdentity(
+        claims,
+        CookieAuthenticationDefaults.AuthenticationScheme);
+
+    await context.SignInAsync(
+        CookieAuthenticationDefaults.AuthenticationScheme,
+        new ClaimsPrincipal(identity));
+
+    var returnUrl = form["returnUrl"].ToString();
+    return string.IsNullOrWhiteSpace(returnUrl) || !returnUrl.StartsWith("/")
+        ? Results.Redirect("/")
+        : Results.Redirect(returnUrl);
+}).RequireRateLimiting("login");
+
+app.MapGet("/logout", async (HttpContext context) =>
+{
+    await context.SignOutAsync(CookieAuthenticationDefaults.AuthenticationScheme);
+    return Results.Redirect("/login");
+});
+
+app.MapGet("/forbidden", () => Results.Content(
+    LoginPage("You do not have permission to access that area."),
+    "text/html"));
 
 app.MapGet("/products", async () => Html("Products", await ProductsPage(), "products"));
 
 app.MapPost("/products", async (HttpRequest request) =>
+    if (!request.HttpContext.User.IsInRole("Owner"))
+        return Results.Forbid();
+
 {
     var form = await request.ReadFormAsync();
     var name = form["name"].ToString().Trim();
@@ -69,6 +229,9 @@ app.MapPost("/products/adjust", async (HttpRequest request) =>
 });
 
 app.MapPost("/products/delete", async (HttpRequest request) =>
+    if (!request.HttpContext.User.IsInRole("Owner"))
+        return Results.Forbid();
+
 {
     var form = await request.ReadFormAsync();
     var id = ParseFormInt(form["id"]);
@@ -107,6 +270,9 @@ app.MapPost("/customers", async (HttpRequest request) =>
 app.MapGet("/expenses", async () => Html("Expenses", await ExpensesPage(), "expenses"));
 
 app.MapPost("/expenses", async (HttpRequest request) =>
+    if (!request.HttpContext.User.IsInRole("Owner"))
+        return Results.Forbid();
+
 {
     var form = await request.ReadFormAsync();
     var category = string.IsNullOrWhiteSpace(form["category"])
@@ -402,11 +568,26 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
     return Html("Receipt", body, "sales");
 });
 
-app.MapGet("/reports", async (HttpRequest request) => Html("Reports", await ReportsPage(request), "reports"));
+app.MapGet("/reports", async (HttpRequest request) =>
+{
+    if (!request.HttpContext.User.IsInRole("Owner"))
+        return Results.Forbid();
 
-app.MapGet("/settings", async () => Html("Settings", await SettingsPage(), "settings"));
+    return Html("Reports", await ReportsPage(request), "reports");
+});
+
+app.MapGet("/settings", async (HttpContext context) =>
+{
+    if (!context.User.IsInRole("Owner"))
+        return Results.Forbid();
+
+    return Html("Settings", await SettingsPage(), "settings");
+});
 
 app.MapPost("/settings", async (HttpRequest request) =>
+    if (!request.HttpContext.User.IsInRole("Owner"))
+        return Results.Forbid();
+
 {
     var form = await request.ReadFormAsync();
 
