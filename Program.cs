@@ -951,6 +951,42 @@ app.MapPost("/staff/toggle", async (HttpRequest request) =>
     return Results.Redirect("/staff");
 });
 
+app.MapPost("/staff/reset-password", async (HttpRequest request, HttpContext context) =>
+{
+    if (!context.User.IsInRole("Owner"))
+        return Results.Forbid();
+
+    var form = await request.ReadFormAsync();
+    var id = ParseFormInt(form["id"]);
+    var password = form["password"].ToString();
+
+    if (id <= 0 || password.Length < 12)
+        return Results.Redirect("/staff?error=Reset%20password%20must%20be%20at%20least%2012%20characters");
+
+    var user = await FindUserById(id);
+
+    if (user is null || user.Role != "Employee")
+        return Results.Redirect("/staff?error=Employee%20account%20not%20found");
+
+    await ExecuteAsync(
+        @"UPDATE users
+          SET password_hash=$hash,must_change_password=1,failed_attempts=0,locked_until=NULL
+          WHERE id=$id AND role='Employee'",
+        command =>
+        {
+            Add(command, "$hash", HashPassword(password));
+            Add(command, "$id", id);
+        });
+
+    await AuditAsync(
+        "Reset Employee Password",
+        "User",
+        id,
+        $"Password reset for employee {user.Username}; employee must change it on next login");
+
+    return Results.Redirect("/staff?reset=1");
+});
+
 app.MapGet("/audit", async (HttpContext context) =>
 {
     if (!context.User.IsInRole("Owner"))
@@ -1771,7 +1807,9 @@ async Task<string> StaffPage(HttpRequest request)
 
     var notice = request.Query["created"] == "1"
         ? "<div class='notice'>Employee account created. Give the employee the temporary password you entered; they must change it on first login.</div>"
-        : "";
+        : request.Query["reset"] == "1"
+            ? "<div class='notice'>Employee password reset successfully. Give the new temporary password to the employee; they must change it on next login.</div>"
+            : "";
 
     var error = request.Query["error"].ToString();
     if (!string.IsNullOrWhiteSpace(error))
@@ -1780,7 +1818,7 @@ async Task<string> StaffPage(HttpRequest request)
     var list = rows.Count == 0
         ? "<p class='muted'>No users found.</p>"
         : $@"<div class='tablewrap'><table>
-            <tr><th>Username</th><th>Role</th><th>Status</th><th>Password</th><th>Action</th></tr>
+            <tr><th>Username</th><th>Role</th><th>Status</th><th>Password</th><th>Owner Actions</th></tr>
             {string.Join("", rows.Select(row =>
             $@"<tr>
                 <td><strong>{E(row["username"])}</strong></td>
@@ -1788,7 +1826,14 @@ async Task<string> StaffPage(HttpRequest request)
                 <td>{(Convert.ToInt32(row["active"]) == 1 ? "Active" : "Disabled")}</td>
                 <td>{(Convert.ToInt32(row["must_change_password"]) == 1 ? "Must change" : "Set")}</td>
                 <td>{(row["role"]?.ToString() == "Employee"
-                    ? $@"<form method='post' action='/staff/toggle'><input type='hidden' name='id' value='{row["id"]}'><button class='link' type='submit'>{(Convert.ToInt32(row["active"]) == 1 ? "Disable" : "Enable")}</button></form>"
+                    ? $@"<div class='actions'>
+                        <form method='post' action='/staff/toggle'><input type='hidden' name='id' value='{row["id"]}'><button class='link' type='submit'>{(Convert.ToInt32(row["active"]) == 1 ? "Disable" : "Enable")}</button></form>
+                        <form method='post' action='/staff/reset-password' class='form-inline'>
+                          <input type='hidden' name='id' value='{row["id"]}'>
+                          <input name='password' type='password' minlength='12' required placeholder='New temp password'>
+                          <button class='link' type='submit'>Reset Password</button>
+                        </form>
+                      </div>"
                     : "<span class='muted'>Owner</span>")}</td>
               </tr>"))}
           </table></div>";
