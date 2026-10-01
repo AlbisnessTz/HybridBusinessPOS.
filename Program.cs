@@ -619,6 +619,14 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
     if (dailyClosed.Count > 0)
         return Results.BadRequest(new { message = "Today's sales are already closed. Ask the Owner to reopen the day before making another sale." });
 
+    var paymentMethod = string.IsNullOrWhiteSpace(input.PaymentMethod)
+        ? "Cash"
+        : input.PaymentMethod.Trim();
+    var paymentReference = input.PaymentReference?.Trim();
+
+    if (paymentMethod == "M-Pesa" && string.IsNullOrWhiteSpace(paymentReference))
+        return Results.BadRequest(new { message = "Enter the M-Pesa transaction reference before completing this sale." });
+
     await using var connection = new SqliteConnection(ConnectionString());
     await connection.OpenAsync();
     await using var transaction = connection.BeginTransaction();
@@ -684,13 +692,11 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
         Add(saleCommand, "$subtotal", subtotal);
         Add(saleCommand, "$discount", discount);
         Add(saleCommand, "$total", total);
-        Add(saleCommand, "$payment",
-            string.IsNullOrWhiteSpace(input.PaymentMethod)
-                ? "Cash"
-                : input.PaymentMethod);
-        Add(saleCommand, "$reference", string.IsNullOrWhiteSpace(input.PaymentReference)
-            ? DBNull.Value
-            : input.PaymentReference.Trim());
+        Add(saleCommand, "$payment", paymentMethod);
+        Add(saleCommand, "$reference",
+            string.IsNullOrWhiteSpace(paymentReference)
+                ? DBNull.Value
+                : paymentReference);
         Add(saleCommand, "$created", DateTime.UtcNow.ToString("O"));
 
         var saleId = Convert.ToInt64(await saleCommand.ExecuteScalarAsync());
@@ -728,8 +734,8 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
             "Completed Sale",
             "Sale",
             (int)saleId,
-            $"Invoice {invoice}; total {Money(total)}; items {lines.Count}; payment {input.PaymentMethod ?? "Cash"}" +
-            $"{(string.IsNullOrWhiteSpace(input.PaymentReference) ? "" : $"; reference {input.PaymentReference.Trim()}")}");
+            $"Invoice {invoice}; total {Money(total)}; items {lines.Count}; payment {paymentMethod}" +
+            $"{(string.IsNullOrWhiteSpace(paymentReference) ? "" : $"; reference {paymentReference}")}");
 
         return Results.Json(new
         {
