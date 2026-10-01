@@ -836,7 +836,8 @@ async Task<string> ReportsPage(HttpRequest request)
           <p>Review sales, profit and expenses by reporting period.</p>
         </div>
         <div class='actions'>
-          <a class='secondary' href='{E(whatsappUrl)}' target='_blank' rel='noopener'>Share on WhatsApp</a>
+          <button class='secondary' type='button' onclick='copyReport(this)' data-report='{E(shareText)}'>Copy Report</button>
+          <a class='secondary' href='{E(whatsappUrl)}' target='_blank' rel='noopener'>Open WhatsApp</a>
           <a class='primary' href='/sales'>+ New Sale</a>
         </div>
       </div>
@@ -869,7 +870,23 @@ async Task<string> ReportsPage(HttpRequest request)
             {bodyRows}
           </table>
         </div>
-      </section>";
+      </section>
+
+      <p id='copyStatus' class='muted'>Tip: use <strong>Copy Report</strong> when WhatsApp cannot be reached. Paste the copied report into any WhatsApp chat.</p>
+      <script>
+        async function copyReport(button) {{
+          const text = button.dataset.report;
+          try {{
+            await navigator.clipboard.writeText(text);
+            const status = document.getElementById('copyStatus');
+            status.textContent = 'Report copied. Open WhatsApp and paste it into the chat.';
+            button.textContent = 'Copied';
+            setTimeout(() => button.textContent = 'Copy Report', 2000);
+          }} catch {{
+            window.prompt('Copy this report and paste it into WhatsApp:', text);
+          }}
+        }}
+      </script>";
 }
 
 async Task<string> SettingsPage()
