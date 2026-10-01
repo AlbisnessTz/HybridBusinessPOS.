@@ -692,10 +692,31 @@ async Task<string> ExpensesPage()
 
 async Task<string> ReportsPage()
 {
+    var summaryRows = await QueryAsync(@"
+        SELECT
+            COALESCE(SUM(s.total),0) sales_total,
+            COALESCE(SUM(si.cost_total),0) cost_total,
+            COALESCE(SUM(s.total - si.cost_total),0) gross_profit
+        FROM sales s
+        LEFT JOIN (
+            SELECT sale_id, COALESCE(SUM(buying_price * quantity),0) cost_total
+            FROM sale_items
+            GROUP BY sale_id
+        ) si ON si.sale_id=s.id");
+
+    var summary = summaryRows[0];
+
+    var expenseRows = await QueryAsync(
+        "SELECT COALESCE(SUM(amount),0) total FROM expenses");
+    var totalExpenses = expenseRows[0]["total"];
+    var netProfit = Convert.ToDouble(summary["gross_profit"] ?? 0) - Convert.ToDouble(totalExpenses ?? 0);
+
     var rows = await QueryAsync(@"
         SELECT s.invoice_no,s.subtotal,s.discount,s.total,s.payment_method,s.created_at,
                COALESCE(c.name,'Walk-in Customer') customer,
-               COALESCE(SUM(si.quantity),0) units
+               COALESCE(SUM(si.quantity),0) units,
+               COALESCE(SUM(si.buying_price * si.quantity),0) cost_total,
+               COALESCE(s.total - SUM(si.buying_price * si.quantity),0) gross_profit
         FROM sales s
         LEFT JOIN customers c ON c.id=s.customer_id
         LEFT JOIN sale_items si ON si.sale_id=s.id
@@ -704,7 +725,7 @@ async Task<string> ReportsPage()
         LIMIT 200");
 
     var bodyRows = rows.Count == 0
-        ? "<tr><td colspan='7' class='muted'>No sales recorded yet.</td></tr>"
+        ? "<tr><td colspan='8' class='muted'>No sales recorded yet.</td></tr>"
         : string.Join("", rows.Select(row =>
             $@"<tr>
                 <td><a class='link' href='/receipt/{Uri.EscapeDataString(row["invoice_no"]?.ToString() ?? "")}'>{E(row["invoice_no"])}</a></td>
@@ -714,18 +735,31 @@ async Task<string> ReportsPage()
                 <td>{E(row["payment_method"])}</td>
                 <td>{Money(row["discount"])}</td>
                 <td><strong>{Money(row["total"])}</strong></td>
+                <td><strong>{Money(row["gross_profit"])}</strong></td>
               </tr>"));
 
     return $@"
       <div class='head'>
-        <div><span class='eyebrow'>REPORTS</span><h1>Sales History</h1><p>Review completed transactions and print receipts.</p></div>
+        <div>
+          <span class='eyebrow'>REPORTS</span>
+          <h1>Sales & Profit Reports</h1>
+          <p>Review completed transactions, gross profit and shop expenses.</p>
+        </div>
         <a class='primary' href='/sales'>+ New Sale</a>
       </div>
 
+      <div class='cards'>
+        <div class='card'><span>Total Sales</span><strong>{Money(summary["sales_total"])}</strong><small>completed transactions</small></div>
+        <div class='card'><span>Gross Profit</span><strong>{Money(summary["gross_profit"])}</strong><small>sales minus product cost</small></div>
+        <div class='card'><span>Total Expenses</span><strong>{Money(totalExpenses)}</strong><small>recorded shop expenses</small></div>
+        <div class='card'><span>Net Profit</span><strong>{Money(netProfit)}</strong><small>gross profit minus expenses</small></div>
+      </div>
+
       <section class='card'>
+        <div class='title'><h2>Sales History</h2><span>Latest 200 transactions</span></div>
         <div class='tablewrap'>
           <table>
-            <tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Units</th><th>Payment</th><th>Discount</th><th>Total</th></tr>
+            <tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Units</th><th>Payment</th><th>Discount</th><th>Total</th><th>Profit</th></tr>
             {bodyRows}
           </table>
         </div>
