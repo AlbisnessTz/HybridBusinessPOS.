@@ -176,10 +176,10 @@ app.MapGet("/products", async (HttpContext context) =>
 });
 
 app.MapPost("/products", async (HttpRequest request) =>
+{
     if (!request.HttpContext.User.IsInRole("Owner"))
         return Results.Forbid();
 
-{
     var form = await request.ReadFormAsync();
     var name = form["name"].ToString().Trim();
 
@@ -232,10 +232,10 @@ app.MapPost("/products/adjust", async (HttpRequest request) =>
 });
 
 app.MapPost("/products/delete", async (HttpRequest request) =>
+{
     if (!request.HttpContext.User.IsInRole("Owner"))
         return Results.Forbid();
 
-{
     var form = await request.ReadFormAsync();
     var id = ParseFormInt(form["id"]);
 
@@ -279,10 +279,10 @@ app.MapGet("/expenses", async (HttpContext context) =>
 });
 
 app.MapPost("/expenses", async (HttpRequest request) =>
+{
     if (!request.HttpContext.User.IsInRole("Owner"))
         return Results.Forbid();
 
-{
     var form = await request.ReadFormAsync();
     var category = string.IsNullOrWhiteSpace(form["category"])
         ? "General"
@@ -704,10 +704,10 @@ app.MapGet("/settings", async (HttpContext context) =>
 });
 
 app.MapPost("/settings", async (HttpRequest request) =>
+{
     if (!request.HttpContext.User.IsInRole("Owner"))
         return Results.Forbid();
 
-{
     var form = await request.ReadFormAsync();
 
     await ExecuteAsync(
