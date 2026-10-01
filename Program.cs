@@ -441,7 +441,8 @@ app.MapPost("/daily-closing/close", async (HttpRequest request, HttpContext cont
     var totalExpenses = Convert.ToDouble(expenses["total"] ?? 0);
     var userId = int.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var parsedId) ? parsedId : 0;
     var username = context.User.Identity?.Name ?? "User";
-    var notes = request.Form["notes"].ToString().Trim();
+    var closeForm = await request.ReadFormAsync();
+    var notes = closeForm["notes"].ToString().Trim();
 
     await ExecuteAsync(
         @"INSERT INTO daily_closings
