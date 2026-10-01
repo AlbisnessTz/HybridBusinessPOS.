@@ -1371,11 +1371,20 @@ async Task<string> DailyClosingPage()
 
     var closingRows = await QueryAsync(
         @"SELECT business_date,total_sales,transaction_count,total_expenses,
+                 actual_cash,actual_mpesa,actual_card,actual_bank,
                  closed_by_username,closed_at,notes
           FROM daily_closings ORDER BY business_date DESC LIMIT 30");
 
     var todayClosing = closingRows.FirstOrDefault(row =>
         string.Equals(row["business_date"]?.ToString(), today, StringComparison.Ordinal));
+
+    var expectedPayments = paymentRows.ToDictionary(
+        row => row["payment_method"]?.ToString() ?? "",
+        row => Convert.ToDouble(row["total"] ?? 0),
+        StringComparer.OrdinalIgnoreCase);
+
+    double Expected(string method)
+        => expectedPayments.TryGetValue(method, out var value) ? value : 0d;
 
     var totalSales = Convert.ToDouble(sales["total"] ?? 0);
     var transactionCount = Convert.ToInt32(sales["count"] ?? 0);
@@ -1408,16 +1417,33 @@ async Task<string> DailyClosingPage()
             <div class='title'><h2>Day Closed</h2><span>{E(todayClosing!["business_date"])}</span></div>
             <p>Closed by <strong>{E(todayClosing!["closed_by_username"])}</strong> at {DateText(todayClosing!["closed_at"])}.</p>
             <p class='muted'>Sales are locked for today. An Owner must reopen the day before another sale can be entered.</p>
+
+            <div class='tablewrap'>
+              <table>
+                <tr><th>Payment</th><th>Expected</th><th>Actual</th><th>Difference</th></tr>
+                <tr><td>Cash</td><td>{Money(Expected("Cash"))}</td><td>{Money(todayClosing!["actual_cash"])}</td><td>{Money(Convert.ToDouble(todayClosing!["actual_cash"] ?? 0) - Expected("Cash"))}</td></tr>
+                <tr><td>M-Pesa</td><td>{Money(Expected("M-Pesa"))}</td><td>{Money(todayClosing!["actual_mpesa"])}</td><td>{Money(Convert.ToDouble(todayClosing!["actual_mpesa"] ?? 0) - Expected("M-Pesa"))}</td></tr>
+                <tr><td>Card</td><td>{Money(Expected("Card"))}</td><td>{Money(todayClosing!["actual_card"])}</td><td>{Money(Convert.ToDouble(todayClosing!["actual_card"] ?? 0) - Expected("Card"))}</td></tr>
+                <tr><td>Bank</td><td>{Money(Expected("Bank"))}</td><td>{Money(todayClosing!["actual_bank"])}</td><td>{Money(Convert.ToDouble(todayClosing!["actual_bank"] ?? 0) - Expected("Bank"))}</td></tr>
+              </table>
+            </div>
+
             {(isOwner ? $@"<form method='post' action='/daily-closing/reopen' onsubmit='return confirm(""Reopen today's sales?"")'>
               <button class='secondary' type='submit'>Reopen Today's Sales</button>
             </form>" : "")}
           </section>"
         : $@"<section class='card'>
             <div class='title'><h2>Close Today's Sales</h2><span>End of day</span></div>
-            <p class='muted'>Add all expenses spent today before closing. Once closed, employees cannot make more sales until an Owner reopens the day.</p>
+            <p class='muted'>Before closing, enter the actual money counted/received for each payment method. The system will compare it with today's recorded sales.</p>
             <form method='post' action='/daily-closing/close' class='form'>
+              <div class='form-grid'>
+                <label>Actual Cash<input name='actual_cash' type='number' min='0' step='0.01' value='{Expected("Cash")}' required></label>
+                <label>Actual M-Pesa<input name='actual_mpesa' type='number' min='0' step='0.01' value='{Expected("M-Pesa")}' required></label>
+                <label>Actual Card<input name='actual_card' type='number' min='0' step='0.01' value='{Expected("Card")}' required></label>
+                <label>Actual Bank<input name='actual_bank' type='number' min='0' step='0.01' value='{Expected("Bank")}' required></label>
+              </div>
               <textarea name='notes' rows='3' placeholder='Closing notes (optional)'></textarea>
-              <button class='primary' type='submit' onclick='return confirm(""Close today's sales now? Make sure all expenses have been added."")'>Close Today's Sales</button>
+              <button class='primary' type='submit' onclick='return confirm(""Close today's sales now? Make sure all expenses and payment counts are correct."")'>Close Today's Sales</button>
             </form>
           </section>";
 
