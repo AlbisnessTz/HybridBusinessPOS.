@@ -10,6 +10,8 @@ using Microsoft.AspNetCore.Authorization;
 
 var builder = WebApplication.CreateBuilder(args);
 
+var dbPath = Path.Combine(builder.Environment.ContentRootPath, "sheehan_lights.db");
+
 builder.Services.AddHttpContextAccessor();
 builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationScheme)
     .AddCookie(options =>
@@ -120,7 +122,6 @@ app.Use(async (context, next) =>
     await next();
 });
 
-var dbPath = Path.Combine(app.Environment.ContentRootPath, "sheehan_lights.db");
 InitializeDatabase();
 CreateAutomaticBackup();
 string ConnectionString() => $"Data Source={dbPath}";
@@ -1842,8 +1843,11 @@ bool IsSameOriginRequest(HttpContext context)
     return false;
 }
 
-bool IsSameAuthority(string value, string expectedHost)
+bool IsSameAuthority(string value, string? expectedHost)
 {
+    if (string.IsNullOrWhiteSpace(expectedHost))
+        return false;
+
     if (!Uri.TryCreate(value, UriKind.Absolute, out var uri))
         return false;
 
