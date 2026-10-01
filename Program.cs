@@ -1109,10 +1109,11 @@ async Task<string> DashboardPage(bool isOwner)
       <div class='cards'>
         <div class='card'><span>Today's Sales</span><strong>{Money(salesToday["total"])}</strong><small>{salesToday["count"]} transactions</small></div>
         <div class='card'><span>Products</span><strong>{products["products"]}</strong><small>catalogue items</small></div>
+        <div class='card'><span>Low Stock</span><strong>{products["low_stock"]}</strong><small>items needing attention</small></div>
         {(isOwner ? $@"<div class='card'><span>Stock Cost</span><strong>{Money(products["stock_cost_value"])}</strong><small>at buying price</small></div>
         <div class='card'><span>Stock Sales Value</span><strong>{Money(products["stock_sales_value"])}</strong><small>at selling price</small></div>
         <div class='card'><span>Potential Profit</span><strong>{Money(products["potential_profit"])}</strong><small>on current stock</small></div>
-        <div class='card'><span>Today's Expenses</span><strong>{Money(expenses["total"])}</strong><small>recorded shop expenses</small></div>" : $@"<div class='card'><span>Low Stock</span><strong>{products["low_stock"]}</strong><small>items needing attention</small></div>")}
+        <div class='card'><span>Today's Expenses</span><strong>{Money(expenses["total"])}</strong><small>recorded shop expenses</small></div>" : "")}
       </div>
 
       <div class='two'>
