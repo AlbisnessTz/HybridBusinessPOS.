@@ -298,6 +298,7 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
     var rows = await QueryAsync(
         @"SELECT s.invoice_no,s.subtotal,s.discount,s.total,s.payment_method,s.created_at,
                  COALESCE(c.name,'Walk-in Customer') customer,
+                 COALESCE(c.phone,'') customer_phone,
                  p.name product,si.quantity,si.unit_price,si.line_total
           FROM sales s
           LEFT JOIN customers c ON c.id=s.customer_id
@@ -321,6 +322,29 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
             <td>{Money(row["line_total"])}</td>
            </tr>"));
 
+    var shareItems = string.Join("\n", rows.Select(row =>
+        $"- {row["product"]} x{row["quantity"]} = {Money(row["line_total"])}"));
+
+    var invoiceText =
+        $"{shop.Name}\n" +
+        $"INVOICE: {first["invoice_no"]}\n" +
+        $"Customer: {first["customer"]}\n" +
+        $"Payment: {first["payment_method"]}\n\n" +
+        $"{shareItems}\n\n" +
+        $"Subtotal: {Money(first["subtotal"])}\n" +
+        $"Discount: {Money(first["discount"])}\n" +
+        $"TOTAL: {Money(first["total"])}\n\n" +
+        $"Thank you for shopping with {shop.Name}.";
+
+    var customerPhone = NormalizePhone(first["customer_phone"]?.ToString());
+    var whatsappUrl = string.IsNullOrWhiteSpace(customerPhone)
+        ? "https://wa.me/?text=" + WebUtility.UrlEncode(invoiceText)
+        : "https://wa.me/" + customerPhone + "?text=" + WebUtility.UrlEncode(invoiceText);
+
+    var whatsappLabel = string.IsNullOrWhiteSpace(customerPhone)
+        ? "Share Invoice on WhatsApp"
+        : "Send to Customer WhatsApp";
+
     var body = $@"
       <section class='receipt card'>
         <div class='receipt-head'>
@@ -330,7 +354,11 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
             <p>{E(shop.Address)}</p>
             <p>{E(shop.Phone)}</p>
           </div>
-          <button class='secondary' onclick='window.print()'>Print</button>
+          <div class='actions'>
+            <button class='secondary' type='button' onclick='window.print()'>Print</button>
+            <button class='secondary' type='button' onclick='copyInvoice(this)' data-invoice='{E(invoiceText)}'>Copy Invoice</button>
+            <a class='primary' href='{E(whatsappUrl)}' target='_blank' rel='noopener'>{whatsappLabel}</a>
+          </div>
         </div>
 
         <div class='receipt-meta'>
@@ -353,7 +381,23 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
         </div>
 
         <p class='muted'>Thank you for shopping with {E(shop.Name)}.</p>
-      </section>";
+        <p id='invoiceCopyStatus' class='muted'></p>
+      </section>
+
+      <script>
+        async function copyInvoice(button) {{
+          const text = button.dataset.invoice;
+          try {{
+            await navigator.clipboard.writeText(text);
+            document.getElementById('invoiceCopyStatus').textContent =
+              'Invoice copied. Paste it into WhatsApp or another message.';
+            button.textContent = 'Copied';
+            setTimeout(() => button.textContent = 'Copy Invoice', 2000);
+          }} catch {{
+            window.prompt('Copy this invoice and paste it into WhatsApp:', text);
+          }}
+        }}
+      </script>";
 
     return Html("Receipt", body, "sales");
 });
