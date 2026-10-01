@@ -611,7 +611,7 @@ app.MapPost("/settings", async (HttpRequest request) =>
 
 app.Run();
 
-async Task<string> DashboardPage()
+async Task<string> DashboardPage(bool isOwner)
 {
     var shop = await ShopSettings();
     var today = DateTime.Now.ToString("yyyy-MM-dd");
@@ -677,31 +677,20 @@ async Task<string> DashboardPage()
       <div class='cards'>
         <div class='card'><span>Today's Sales</span><strong>{Money(salesToday["total"])}</strong><small>{salesToday["count"]} transactions</small></div>
         <div class='card'><span>Products</span><strong>{products["products"]}</strong><small>catalogue items</small></div>
-        <div class='card'><span>Stock Cost</span><strong>{Money(products["stock_cost_value"])}</strong><small>at buying price</small></div>
+        {(isOwner ? $@"<div class='card'><span>Stock Cost</span><strong>{Money(products["stock_cost_value"])}</strong><small>at buying price</small></div>
         <div class='card'><span>Stock Sales Value</span><strong>{Money(products["stock_sales_value"])}</strong><small>at selling price</small></div>
         <div class='card'><span>Potential Profit</span><strong>{Money(products["potential_profit"])}</strong><small>on current stock</small></div>
-        <div class='card'><span>Today's Expenses</span><strong>{Money(expenses["total"])}</strong><small>recorded expenses</small></div>
+        <div class='card'><span>Today's Expenses</span><strong>{Money(expenses["total"])}</strong><small>recorded shop expenses</small></div>" : $@"<div class='card'><span>Low Stock</span><strong>{products["low_stock"]}</strong><small>items needing attention</small></div>")}
       </div>
 
       <div class='two'>
         <section class='card'>
-          <div class='title'><h2>Recent Sales</h2><a href='/reports'>View reports →</a></div>
-          {recentRows}
-        </section>
-
-        <section class='card'>
-          <div class='title'><h2>Low Stock</h2><a href='/products'>Manage →</a></div>
-          {lowRows}
-        </section>
-      </div>
-
-      <section class='card'>
         <div class='title'><h2>Quick Actions</h2></div>
         <div class='quick-grid'>
           <a class='action-card' href='/sales'><strong>New Sale</strong><span>Open the POS</span></a>
-          <a class='action-card' href='/products'><strong>Add Product</strong><span>Update inventory</span></a>
+          <a class='action-card' href='/products'><strong>Products</strong><span>View and manage inventory</span></a>
           <a class='action-card' href='/customers'><strong>Add Customer</strong><span>Save customer details</span></a>
-          <a class='action-card' href='/expenses'><strong>Record Expense</strong><span>Track shop costs</span></a>
+          {(isOwner ? "<a class='action-card' href='/expenses'><strong>Record Expense</strong><span>Track shop costs</span></a>" : "")}
         </div>
       </section>";
 }
