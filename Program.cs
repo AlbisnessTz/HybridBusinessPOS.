@@ -1064,6 +1064,19 @@ string DateText(object? value)
         ? date.ToLocalTime().ToString("dd MMM yyyy HH:mm")
         : value?.ToString() ?? "";
 
+string NormalizePhone(string? value)
+{
+    var phone = new string((value ?? "").Where(char.IsDigit).ToArray());
+
+    if (phone.StartsWith("00"))
+        phone = phone[2..];
+
+    if (phone.StartsWith("0"))
+        phone = "255" + phone[1..];
+
+    return phone;
+}
+
 void InitializeDatabase()
 {
     using var connection = new SqliteConnection(ConnectionString());
