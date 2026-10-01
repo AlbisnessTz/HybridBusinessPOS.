@@ -2405,6 +2405,10 @@ CREATE TABLE IF NOT EXISTS daily_closings(
     total_sales REAL NOT NULL DEFAULT 0,
     transaction_count INTEGER NOT NULL DEFAULT 0,
     total_expenses REAL NOT NULL DEFAULT 0,
+    actual_cash REAL NULL,
+    actual_mpesa REAL NULL,
+    actual_card REAL NULL,
+    actual_bank REAL NULL,
     notes TEXT,
     closed_at TEXT NOT NULL
 );
@@ -2417,6 +2421,34 @@ VALUES(1,'Sheehan Lights','','','TSh');";
     {
         using var alter = connection.CreateCommand();
         alter.CommandText = "ALTER TABLE sales ADD COLUMN payment_reference TEXT NULL";
+        alter.ExecuteNonQuery();
+    }
+
+    if (!ColumnExists(connection, "daily_closings", "actual_cash"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE daily_closings ADD COLUMN actual_cash REAL NULL";
+        alter.ExecuteNonQuery();
+    }
+
+    if (!ColumnExists(connection, "daily_closings", "actual_mpesa"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE daily_closings ADD COLUMN actual_mpesa REAL NULL";
+        alter.ExecuteNonQuery();
+    }
+
+    if (!ColumnExists(connection, "daily_closings", "actual_card"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE daily_closings ADD COLUMN actual_card REAL NULL";
+        alter.ExecuteNonQuery();
+    }
+
+    if (!ColumnExists(connection, "daily_closings", "actual_bank"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE daily_closings ADD COLUMN actual_bank REAL NULL";
         alter.ExecuteNonQuery();
     }
 
