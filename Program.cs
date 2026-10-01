@@ -439,15 +439,32 @@ app.MapPost("/daily-closing/close", async (HttpRequest request, HttpContext cont
     var totalSales = Convert.ToDouble(sales["total"] ?? 0);
     var count = Convert.ToInt32(sales["count"] ?? 0);
     var totalExpenses = Convert.ToDouble(expenses["total"] ?? 0);
+    var paymentRows = await QueryAsync(
+        @"SELECT payment_method,COALESCE(SUM(total),0) total
+          FROM sales
+          WHERE created_at >= $start AND created_at < $end
+          GROUP BY payment_method",
+        command =>
+        {
+            Add(command, "$start", startUtc);
+            Add(command, "$end", endUtc);
+        });
+
+    var closeForm = await request.ReadFormAsync();
+    var actualCash = Math.Max(0, ParseFormMoney(closeForm["actual_cash"]));
+    var actualMpesa = Math.Max(0, ParseFormMoney(closeForm["actual_mpesa"]));
+    var actualCard = Math.Max(0, ParseFormMoney(closeForm["actual_card"]));
+    var actualBank = Math.Max(0, ParseFormMoney(closeForm["actual_bank"]));
+
     var userId = int.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var parsedId) ? parsedId : 0;
     var username = context.User.Identity?.Name ?? "User";
-    var closeForm = await request.ReadFormAsync();
     var notes = closeForm["notes"].ToString().Trim();
 
     await ExecuteAsync(
         @"INSERT INTO daily_closings
-          (business_date,closed_by_user_id,closed_by_username,total_sales,transaction_count,total_expenses,notes,closed_at)
-          VALUES($date,$user_id,$username,$sales,$count,$expenses,$notes,$closed_at)",
+          (business_date,closed_by_user_id,closed_by_username,total_sales,transaction_count,total_expenses,
+           actual_cash,actual_mpesa,actual_card,actual_bank,notes,closed_at)
+          VALUES($date,$user_id,$username,$sales,$count,$expenses,$actual_cash,$actual_mpesa,$actual_card,$actual_bank,$notes,$closed_at)",
         command =>
         {
             Add(command, "$date", today);
@@ -456,6 +473,10 @@ app.MapPost("/daily-closing/close", async (HttpRequest request, HttpContext cont
             Add(command, "$sales", totalSales);
             Add(command, "$count", count);
             Add(command, "$expenses", totalExpenses);
+            Add(command, "$actual_cash", actualCash);
+            Add(command, "$actual_mpesa", actualMpesa);
+            Add(command, "$actual_card", actualCard);
+            Add(command, "$actual_bank", actualBank);
             Add(command, "$notes", notes);
             Add(command, "$closed_at", DateTime.UtcNow.ToString("O"));
         });
@@ -590,6 +611,14 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
     if (dailyClosed.Count > 0)
         return Results.BadRequest(new { message = "Today's sales are already closed. Ask the Owner to reopen the day before making another sale." });
 
+    var paymentMethod = string.IsNullOrWhiteSpace(input.PaymentMethod)
+        ? "Cash"
+        : input.PaymentMethod.Trim();
+    var paymentReference = input.PaymentReference?.Trim();
+
+    if (paymentMethod == "M-Pesa" && string.IsNullOrWhiteSpace(paymentReference))
+        return Results.BadRequest(new { message = "Enter the M-Pesa transaction reference before completing this sale." });
+
     await using var connection = new SqliteConnection(ConnectionString());
     await connection.OpenAsync();
     await using var transaction = connection.BeginTransaction();
@@ -645,8 +674,8 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
         saleCommand.Transaction = transaction;
         saleCommand.CommandText = @"
             INSERT INTO sales
-            (invoice_no,customer_id,subtotal,discount,total,payment_method,created_at)
-            VALUES($invoice,$customer,$subtotal,$discount,$total,$payment,$created)
+            (invoice_no,customer_id,subtotal,discount,total,payment_method,payment_reference,created_at)
+            VALUES($invoice,$customer,$subtotal,$discount,$total,$payment,$reference,$created)
             RETURNING id";
 
         Add(saleCommand, "$invoice", invoice);
@@ -655,10 +684,11 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
         Add(saleCommand, "$subtotal", subtotal);
         Add(saleCommand, "$discount", discount);
         Add(saleCommand, "$total", total);
-        Add(saleCommand, "$payment",
-            string.IsNullOrWhiteSpace(input.PaymentMethod)
-                ? "Cash"
-                : input.PaymentMethod);
+        Add(saleCommand, "$payment", paymentMethod);
+        Add(saleCommand, "$reference",
+            string.IsNullOrWhiteSpace(paymentReference)
+                ? DBNull.Value
+                : paymentReference);
         Add(saleCommand, "$created", DateTime.UtcNow.ToString("O"));
 
         var saleId = Convert.ToInt64(await saleCommand.ExecuteScalarAsync());
@@ -696,7 +726,8 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
             "Completed Sale",
             "Sale",
             (int)saleId,
-            $"Invoice {invoice}; total {Money(total)}; items {lines.Count}; payment {input.PaymentMethod ?? "Cash"}");
+            $"Invoice {invoice}; total {Money(total)}; items {lines.Count}; payment {paymentMethod}" +
+            $"{(string.IsNullOrWhiteSpace(paymentReference) ? "" : $"; reference {paymentReference}")}");
 
         return Results.Json(new
         {
@@ -718,7 +749,7 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
 app.MapGet("/receipt/{invoice}", async (string invoice) =>
 {
     var rows = await QueryAsync(
-        @"SELECT s.invoice_no,s.subtotal,s.discount,s.total,s.payment_method,s.created_at,
+        @"SELECT s.invoice_no,s.subtotal,s.discount,s.total,s.payment_method,s.payment_reference,s.created_at,
                  COALESCE(c.name,'Walk-in Customer') customer,
                  COALESCE(c.phone,'') customer_phone,
                  p.name product,si.quantity,si.unit_price,si.line_total
@@ -787,6 +818,7 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
           <span>Invoice<strong>{E(first["invoice_no"])}</strong></span>
           <span>Customer<strong>{E(first["customer"])}</strong></span>
           <span>Payment<strong>{E(first["payment_method"])}</strong></span>
+          {(string.IsNullOrWhiteSpace(first["payment_reference"]?.ToString()) ? "" : $@"<span>Reference<strong>{E(first["payment_reference"])}</strong></span>")}
         </div>
 
         <div class='tablewrap'>
@@ -946,6 +978,42 @@ app.MapPost("/staff/toggle", async (HttpRequest request) =>
     return Results.Redirect("/staff");
 });
 
+app.MapPost("/staff/reset-password", async (HttpRequest request, HttpContext context) =>
+{
+    if (!context.User.IsInRole("Owner"))
+        return Results.Forbid();
+
+    var form = await request.ReadFormAsync();
+    var id = ParseFormInt(form["id"]);
+    var password = form["password"].ToString();
+
+    if (id <= 0 || password.Length < 12)
+        return Results.Redirect("/staff?error=Reset%20password%20must%20be%20at%20least%2012%20characters");
+
+    var user = await FindUserById(id);
+
+    if (user is null || user.Role != "Employee")
+        return Results.Redirect("/staff?error=Employee%20account%20not%20found");
+
+    await ExecuteAsync(
+        @"UPDATE users
+          SET password_hash=$hash,must_change_password=1,failed_attempts=0,locked_until=NULL
+          WHERE id=$id AND role='Employee'",
+        command =>
+        {
+            Add(command, "$hash", HashPassword(password));
+            Add(command, "$id", id);
+        });
+
+    await AuditAsync(
+        "Reset Employee Password",
+        "User",
+        id,
+        $"Password reset for employee {user.Username}; employee must change it on next login");
+
+    return Results.Redirect("/staff?reset=1");
+});
+
 app.MapGet("/audit", async (HttpContext context) =>
 {
     if (!context.User.IsInRole("Owner"))
@@ -1068,10 +1136,11 @@ async Task<string> DashboardPage(bool isOwner)
       <div class='cards'>
         <div class='card'><span>Today's Sales</span><strong>{Money(salesToday["total"])}</strong><small>{salesToday["count"]} transactions</small></div>
         <div class='card'><span>Products</span><strong>{products["products"]}</strong><small>catalogue items</small></div>
+        <div class='card'><span>Low Stock</span><strong>{products["low_stock"]}</strong><small>items needing attention</small></div>
         {(isOwner ? $@"<div class='card'><span>Stock Cost</span><strong>{Money(products["stock_cost_value"])}</strong><small>at buying price</small></div>
         <div class='card'><span>Stock Sales Value</span><strong>{Money(products["stock_sales_value"])}</strong><small>at selling price</small></div>
         <div class='card'><span>Potential Profit</span><strong>{Money(products["potential_profit"])}</strong><small>on current stock</small></div>
-        <div class='card'><span>Today's Expenses</span><strong>{Money(expenses["total"])}</strong><small>recorded shop expenses</small></div>" : $@"<div class='card'><span>Low Stock</span><strong>{products["low_stock"]}</strong><small>items needing attention</small></div>")}
+        <div class='card'><span>Today's Expenses</span><strong>{Money(expenses["total"])}</strong><small>recorded shop expenses</small></div>" : "")}
       </div>
 
       <div class='two'>
@@ -1186,6 +1255,9 @@ async Task<string> SalesPage()
             <option>Card</option>
             <option>Bank</option>
           </select></label>
+          <label id='paymentReferenceWrap' hidden>Transaction Reference
+            <input id='paymentReference' maxlength='80' placeholder='M-Pesa reference e.g. QWE123ABC'>
+          </label>
           <label>Discount<input id='discount' type='number' min='0' step='0.01' value='0'></label>
         </div>
 
@@ -1297,11 +1369,20 @@ async Task<string> DailyClosingPage()
 
     var closingRows = await QueryAsync(
         @"SELECT business_date,total_sales,transaction_count,total_expenses,
+                 actual_cash,actual_mpesa,actual_card,actual_bank,
                  closed_by_username,closed_at,notes
           FROM daily_closings ORDER BY business_date DESC LIMIT 30");
 
     var todayClosing = closingRows.FirstOrDefault(row =>
         string.Equals(row["business_date"]?.ToString(), today, StringComparison.Ordinal));
+
+    var expectedPayments = paymentRows.ToDictionary(
+        row => row["payment_method"]?.ToString() ?? "",
+        row => Convert.ToDouble(row["total"] ?? 0),
+        StringComparer.OrdinalIgnoreCase);
+
+    double Expected(string method)
+        => expectedPayments.TryGetValue(method, out var value) ? value : 0d;
 
     var totalSales = Convert.ToDouble(sales["total"] ?? 0);
     var transactionCount = Convert.ToInt32(sales["count"] ?? 0);
@@ -1334,16 +1415,33 @@ async Task<string> DailyClosingPage()
             <div class='title'><h2>Day Closed</h2><span>{E(todayClosing!["business_date"])}</span></div>
             <p>Closed by <strong>{E(todayClosing!["closed_by_username"])}</strong> at {DateText(todayClosing!["closed_at"])}.</p>
             <p class='muted'>Sales are locked for today. An Owner must reopen the day before another sale can be entered.</p>
+
+            <div class='tablewrap'>
+              <table>
+                <tr><th>Payment</th><th>Expected</th><th>Actual</th><th>Difference</th></tr>
+                <tr><td>Cash</td><td>{Money(Expected("Cash"))}</td><td>{Money(todayClosing!["actual_cash"])}</td><td>{Money(Convert.ToDouble(todayClosing!["actual_cash"] ?? 0) - Expected("Cash"))}</td></tr>
+                <tr><td>M-Pesa</td><td>{Money(Expected("M-Pesa"))}</td><td>{Money(todayClosing!["actual_mpesa"])}</td><td>{Money(Convert.ToDouble(todayClosing!["actual_mpesa"] ?? 0) - Expected("M-Pesa"))}</td></tr>
+                <tr><td>Card</td><td>{Money(Expected("Card"))}</td><td>{Money(todayClosing!["actual_card"])}</td><td>{Money(Convert.ToDouble(todayClosing!["actual_card"] ?? 0) - Expected("Card"))}</td></tr>
+                <tr><td>Bank</td><td>{Money(Expected("Bank"))}</td><td>{Money(todayClosing!["actual_bank"])}</td><td>{Money(Convert.ToDouble(todayClosing!["actual_bank"] ?? 0) - Expected("Bank"))}</td></tr>
+              </table>
+            </div>
+
             {(isOwner ? $@"<form method='post' action='/daily-closing/reopen' onsubmit='return confirm(""Reopen today's sales?"")'>
               <button class='secondary' type='submit'>Reopen Today's Sales</button>
             </form>" : "")}
           </section>"
         : $@"<section class='card'>
             <div class='title'><h2>Close Today's Sales</h2><span>End of day</span></div>
-            <p class='muted'>Add all expenses spent today before closing. Once closed, employees cannot make more sales until an Owner reopens the day.</p>
+            <p class='muted'>Before closing, enter the actual money counted/received for each payment method. The system will compare it with today's recorded sales.</p>
             <form method='post' action='/daily-closing/close' class='form'>
+              <div class='form-grid'>
+                <label>Actual Cash<input name='actual_cash' type='number' min='0' step='0.01' value='{Expected("Cash")}' required></label>
+                <label>Actual M-Pesa<input name='actual_mpesa' type='number' min='0' step='0.01' value='{Expected("M-Pesa")}' required></label>
+                <label>Actual Card<input name='actual_card' type='number' min='0' step='0.01' value='{Expected("Card")}' required></label>
+                <label>Actual Bank<input name='actual_bank' type='number' min='0' step='0.01' value='{Expected("Bank")}' required></label>
+              </div>
               <textarea name='notes' rows='3' placeholder='Closing notes (optional)'></textarea>
-              <button class='primary' type='submit' onclick='return confirm(""Close today's sales now? Make sure all expenses have been added."")'>Close Today's Sales</button>
+              <button class='primary' type='submit' onclick='return confirm(""Close today's sales now? Make sure all expenses and payment counts are correct."")'>Close Today's Sales</button>
             </form>
           </section>";
 
@@ -1763,7 +1861,9 @@ async Task<string> StaffPage(HttpRequest request)
 
     var notice = request.Query["created"] == "1"
         ? "<div class='notice'>Employee account created. Give the employee the temporary password you entered; they must change it on first login.</div>"
-        : "";
+        : request.Query["reset"] == "1"
+            ? "<div class='notice'>Employee password reset successfully. Give the new temporary password to the employee; they must change it on next login.</div>"
+            : "";
 
     var error = request.Query["error"].ToString();
     if (!string.IsNullOrWhiteSpace(error))
@@ -1772,7 +1872,7 @@ async Task<string> StaffPage(HttpRequest request)
     var list = rows.Count == 0
         ? "<p class='muted'>No users found.</p>"
         : $@"<div class='tablewrap'><table>
-            <tr><th>Username</th><th>Role</th><th>Status</th><th>Password</th><th>Action</th></tr>
+            <tr><th>Username</th><th>Role</th><th>Status</th><th>Password</th><th>Owner Actions</th></tr>
             {string.Join("", rows.Select(row =>
             $@"<tr>
                 <td><strong>{E(row["username"])}</strong></td>
@@ -1780,7 +1880,14 @@ async Task<string> StaffPage(HttpRequest request)
                 <td>{(Convert.ToInt32(row["active"]) == 1 ? "Active" : "Disabled")}</td>
                 <td>{(Convert.ToInt32(row["must_change_password"]) == 1 ? "Must change" : "Set")}</td>
                 <td>{(row["role"]?.ToString() == "Employee"
-                    ? $@"<form method='post' action='/staff/toggle'><input type='hidden' name='id' value='{row["id"]}'><button class='link' type='submit'>{(Convert.ToInt32(row["active"]) == 1 ? "Disable" : "Enable")}</button></form>"
+                    ? $@"<div class='actions'>
+                        <form method='post' action='/staff/toggle'><input type='hidden' name='id' value='{row["id"]}'><button class='link' type='submit'>{(Convert.ToInt32(row["active"]) == 1 ? "Disable" : "Enable")}</button></form>
+                        <form method='post' action='/staff/reset-password' class='form-inline'>
+                          <input type='hidden' name='id' value='{row["id"]}'>
+                          <input name='password' type='password' minlength='12' required placeholder='New temp password'>
+                          <button class='link' type='submit'>Reset Password</button>
+                        </form>
+                      </div>"
                     : "<span class='muted'>Owner</span>")}</td>
               </tr>"))}
           </table></div>";
@@ -2316,6 +2423,7 @@ CREATE TABLE IF NOT EXISTS sales(
     discount REAL NOT NULL DEFAULT 0,
     total REAL NOT NULL,
     payment_method TEXT NOT NULL,
+    payment_reference TEXT NULL,
     created_at TEXT NOT NULL
 );
 
@@ -2350,6 +2458,10 @@ CREATE TABLE IF NOT EXISTS daily_closings(
     total_sales REAL NOT NULL DEFAULT 0,
     transaction_count INTEGER NOT NULL DEFAULT 0,
     total_expenses REAL NOT NULL DEFAULT 0,
+    actual_cash REAL NULL,
+    actual_mpesa REAL NULL,
+    actual_card REAL NULL,
+    actual_bank REAL NULL,
     notes TEXT,
     closed_at TEXT NOT NULL
 );
@@ -2357,6 +2469,41 @@ CREATE TABLE IF NOT EXISTS daily_closings(
 INSERT OR IGNORE INTO settings(id,shop_name,phone,address,currency)
 VALUES(1,'Sheehan Lights','','','TSh');";
     command.ExecuteNonQuery();
+
+    if (!ColumnExists(connection, "sales", "payment_reference"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE sales ADD COLUMN payment_reference TEXT NULL";
+        alter.ExecuteNonQuery();
+    }
+
+    if (!ColumnExists(connection, "daily_closings", "actual_cash"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE daily_closings ADD COLUMN actual_cash REAL NULL";
+        alter.ExecuteNonQuery();
+    }
+
+    if (!ColumnExists(connection, "daily_closings", "actual_mpesa"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE daily_closings ADD COLUMN actual_mpesa REAL NULL";
+        alter.ExecuteNonQuery();
+    }
+
+    if (!ColumnExists(connection, "daily_closings", "actual_card"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE daily_closings ADD COLUMN actual_card REAL NULL";
+        alter.ExecuteNonQuery();
+    }
+
+    if (!ColumnExists(connection, "daily_closings", "actual_bank"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE daily_closings ADD COLUMN actual_bank REAL NULL";
+        alter.ExecuteNonQuery();
+    }
 
     if (!ColumnExists(connection, "expenses", "recorded_by_user_id"))
     {
@@ -2499,6 +2646,7 @@ record AppUser(
 record CheckoutRequest(
     int? CustomerId,
     string? PaymentMethod,
+    string? PaymentReference,
     double Discount,
     List<CheckoutItem> Items);
 
