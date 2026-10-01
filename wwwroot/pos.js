@@ -122,6 +122,7 @@ async function completeSale(){
   const payload={
     customerId:el("customerSelect").value ? Number(el("customerSelect").value) : null,
     paymentMethod:el("paymentMethod").value,
+    paymentReference:el("paymentReference").value.trim() || null,
     discount:Number(el("discount").value||0),
     items:cart.map(item=>({productId:item.id,quantity:item.quantity}))
   };
@@ -153,7 +154,20 @@ function message(text="",error=false){
   box.className="result"+(error?" error":"");
 }
 
+function updatePaymentReference(){
+  const field=document.getElementById("paymentReferenceWrap");
+  const input=document.getElementById("paymentReference");
+  const isMpes=document.getElementById("paymentMethod").value==="M-Pesa";
+
+  field.hidden=!isMpes;
+  input.required=isMpes;
+
+  if(!isMpes) input.value="";
+}
+
 document.addEventListener("DOMContentLoaded",()=>{
   el("discount").addEventListener("input",renderCart);
+  el("paymentMethod").addEventListener("change",updatePaymentReference);
+  updatePaymentReference();
   loadPos().catch(error=>message(error.message||String(error),true));
 });
