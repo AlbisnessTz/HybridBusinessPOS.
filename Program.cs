@@ -358,7 +358,7 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
     return Html("Receipt", body, "sales");
 });
 
-app.MapGet("/reports", async () => Html("Reports", await ReportsPage(), "reports"));
+app.MapGet("/reports", async (HttpRequest request) => Html("Reports", await ReportsPage(request), "reports"));
 
 app.MapGet("/settings", async () => Html("Settings", await SettingsPage(), "settings"));
 
@@ -690,9 +690,57 @@ async Task<string> ExpensesPage()
       </section>";
 }
 
-async Task<string> ReportsPage()
+async Task<string> ReportsPage(HttpRequest request)
 {
-    var summaryRows = await QueryAsync(@"
+    var period = request.Query["period"].ToString().ToLowerInvariant();
+
+    if (period is not ("today" or "week" or "month" or "all"))
+        period = "all";
+
+    var todayLocal = DateTime.Today;
+    DateTime startLocal;
+    DateTime endLocal;
+    string periodLabel;
+
+    switch (period)
+    {
+        case "today":
+            startLocal = todayLocal;
+            endLocal = todayLocal.AddDays(1);
+            periodLabel = "Today";
+            break;
+
+        case "week":
+            var daysSinceMonday = ((int)todayLocal.DayOfWeek + 6) % 7;
+            startLocal = todayLocal.AddDays(-daysSinceMonday);
+            endLocal = startLocal.AddDays(7);
+            periodLabel = "This Week";
+            break;
+
+        case "month":
+            startLocal = new DateTime(todayLocal.Year, todayLocal.Month, 1);
+            endLocal = startLocal.AddMonths(1);
+            periodLabel = "This Month";
+            break;
+
+        default:
+            startLocal = DateTime.MinValue;
+            endLocal = DateTime.MaxValue;
+            periodLabel = "All Time";
+            break;
+    }
+
+    var useDateFilter = period != "all";
+    var startUtc = DateTime.SpecifyKind(startLocal, DateTimeKind.Local).ToUniversalTime().ToString("O");
+    var endUtc = DateTime.SpecifyKind(endLocal, DateTimeKind.Local).ToUniversalTime().ToString("O");
+    var expenseStart = startLocal.ToString("yyyy-MM-dd");
+    var expenseEnd = endLocal.ToString("yyyy-MM-dd");
+
+    var salesFilter = useDateFilter
+        ? " WHERE s.created_at >= $start AND s.created_at < $end"
+        : "";
+
+    var summaryRows = await QueryAsync($@"
         SELECT
             COALESCE(SUM(s.total),0) sales_total,
             COALESCE(SUM(si.cost_total),0) cost_total,
@@ -702,16 +750,38 @@ async Task<string> ReportsPage()
             SELECT sale_id, COALESCE(SUM(buying_price * quantity),0) cost_total
             FROM sale_items
             GROUP BY sale_id
-        ) si ON si.sale_id=s.id");
+        ) si ON si.sale_id=s.id
+        {salesFilter}",
+        command =>
+        {
+            if (useDateFilter)
+            {
+                Add(command, "$start", startUtc);
+                Add(command, "$end", endUtc);
+            }
+        });
 
     var summary = summaryRows[0];
 
+    var expenseFilter = useDateFilter
+        ? " WHERE expense_date >= $expenseStart AND expense_date < $expenseEnd"
+        : "";
+
     var expenseRows = await QueryAsync(
-        "SELECT COALESCE(SUM(amount),0) total FROM expenses");
+        $"SELECT COALESCE(SUM(amount),0) total FROM expenses{expenseFilter}",
+        command =>
+        {
+            if (useDateFilter)
+            {
+                Add(command, "$expenseStart", expenseStart);
+                Add(command, "$expenseEnd", expenseEnd);
+            }
+        });
+
     var totalExpenses = expenseRows[0]["total"];
     var netProfit = Convert.ToDouble(summary["gross_profit"] ?? 0) - Convert.ToDouble(totalExpenses ?? 0);
 
-    var rows = await QueryAsync(@"
+    var rows = await QueryAsync($@"
         SELECT s.invoice_no,s.subtotal,s.discount,s.total,s.payment_method,s.created_at,
                COALESCE(c.name,'Walk-in Customer') customer,
                COALESCE(SUM(si.quantity),0) units,
@@ -720,12 +790,21 @@ async Task<string> ReportsPage()
         FROM sales s
         LEFT JOIN customers c ON c.id=s.customer_id
         LEFT JOIN sale_items si ON si.sale_id=s.id
+        {salesFilter}
         GROUP BY s.id
         ORDER BY s.id DESC
-        LIMIT 200");
+        LIMIT 200",
+        command =>
+        {
+            if (useDateFilter)
+            {
+                Add(command, "$start", startUtc);
+                Add(command, "$end", endUtc);
+            }
+        });
 
     var bodyRows = rows.Count == 0
-        ? "<tr><td colspan='8' class='muted'>No sales recorded yet.</td></tr>"
+        ? "<tr><td colspan='8' class='muted'>No sales recorded for this period.</td></tr>"
         : string.Join("", rows.Select(row =>
             $@"<tr>
                 <td><a class='link' href='/receipt/{Uri.EscapeDataString(row["invoice_no"]?.ToString() ?? "")}'>{E(row["invoice_no"])}</a></td>
@@ -738,25 +817,52 @@ async Task<string> ReportsPage()
                 <td><strong>{Money(row["gross_profit"])}</strong></td>
               </tr>"));
 
+    var shareText =
+        $"SHEEHAN LIGHTS\n{periodLabel} BUSINESS REPORT\n\n" +
+        $"Total Sales: {Money(summary["sales_total"])}\n" +
+        $"Gross Profit: {Money(summary["gross_profit"])}\n" +
+        $"Total Expenses: {Money(totalExpenses)}\n" +
+        $"Net Profit: {Money(netProfit)}\n\n" +
+        $"Report period: {periodLabel}\n" +
+        $"Generated: {DateTime.Now:dd MMM yyyy HH:mm}";
+
+    var whatsappUrl = "https://wa.me/?text=" + WebUtility.UrlEncode(shareText);
+
     return $@"
       <div class='head'>
         <div>
           <span class='eyebrow'>REPORTS</span>
           <h1>Sales & Profit Reports</h1>
-          <p>Review completed transactions, gross profit and shop expenses.</p>
+          <p>Review sales, profit and expenses by reporting period.</p>
         </div>
-        <a class='primary' href='/sales'>+ New Sale</a>
+        <div class='actions'>
+          <a class='secondary' href='{E(whatsappUrl)}' target='_blank' rel='noopener'>Share on WhatsApp</a>
+          <a class='primary' href='/sales'>+ New Sale</a>
+        </div>
       </div>
 
+      <section class='card'>
+        <div class='title'>
+          <h2>Report Period</h2>
+          <span>{E(periodLabel)}</span>
+        </div>
+        <div class='actions'>
+          <a class='{(period == "today" ? "primary" : "secondary")}' href='/reports?period=today'>Today</a>
+          <a class='{(period == "week" ? "primary" : "secondary")}' href='/reports?period=week'>This Week</a>
+          <a class='{(period == "month" ? "primary" : "secondary")}' href='/reports?period=month'>This Month</a>
+          <a class='{(period == "all" ? "primary" : "secondary")}' href='/reports?period=all'>All Time</a>
+        </div>
+      </section>
+
       <div class='cards'>
-        <div class='card'><span>Total Sales</span><strong>{Money(summary["sales_total"])}</strong><small>completed transactions</small></div>
+        <div class='card'><span>Total Sales</span><strong>{Money(summary["sales_total"])}</strong><small>{E(periodLabel)}</small></div>
         <div class='card'><span>Gross Profit</span><strong>{Money(summary["gross_profit"])}</strong><small>sales minus product cost</small></div>
         <div class='card'><span>Total Expenses</span><strong>{Money(totalExpenses)}</strong><small>recorded shop expenses</small></div>
         <div class='card'><span>Net Profit</span><strong>{Money(netProfit)}</strong><small>gross profit minus expenses</small></div>
       </div>
 
       <section class='card'>
-        <div class='title'><h2>Sales History</h2><span>Latest 200 transactions</span></div>
+        <div class='title'><h2>Sales History</h2><span>Latest 200 in selected period</span></div>
         <div class='tablewrap'>
           <table>
             <tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Units</th><th>Payment</th><th>Discount</th><th>Total</th><th>Profit</th></tr>
