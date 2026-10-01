@@ -774,7 +774,7 @@ IResult Html(string title, string body, string active)
       <a class='{(active == "reports" ? "on" : "")}' href='/reports'>Reports</a>
       <a class='{(active == "settings" ? "on" : "")}' href='/settings'>Settings</a>";
 
-    return $@"<!doctype html>
+    return Results.Content($@"<!doctype html>
 <html lang='en'>
 <head>
   <meta charset='utf-8'>
@@ -790,7 +790,7 @@ IResult Html(string title, string body, string active)
 <main>{body}</main>
 <footer>Sheehan Lights · HybridBusinessPOS · Local SQLite</footer>
 </body>
-</html>";
+</html>","text/html");
 }
 
 async Task ExecuteAsync(string sql, Action<SqliteCommand> bind)
