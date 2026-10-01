@@ -1242,6 +1242,160 @@ async Task<string> CustomersPage()
       </section>";
 }
 
+async Task<string> DailyClosingPage()
+{
+    var context = httpContextAccessor.HttpContext;
+    var username = context?.User.Identity?.Name ?? "User";
+    var isOwner = context?.User.IsInRole("Owner") == true;
+    var today = DateTime.Today.ToString("yyyy-MM-dd");
+    var error = context?.Request.Query["error"].ToString();
+    var saved = context?.Request.Query["saved"].ToString() == "1";
+    var closedNotice = context?.Request.Query["closed"].ToString() == "1";
+    var reopenedNotice = context?.Request.Query["reopened"].ToString() == "1";
+    var (startUtc, endUtc) = LocalDayUtcRange(DateTime.Today);
+
+    var sales = (await QueryAsync(
+        @"SELECT COALESCE(SUM(total),0) total,COUNT(*) count
+          FROM sales WHERE created_at >= $start AND created_at < $end",
+        command =>
+        {
+            Add(command, "$start", startUtc);
+            Add(command, "$end", endUtc);
+        }))[0];
+
+    var expenses = await QueryAsync(
+        @"SELECT id,category,description,amount,created_at,
+                 COALESCE(recorded_by_username,'Unknown') recorded_by
+          FROM expenses WHERE expense_date=$date ORDER BY id DESC",
+        command => Add(command, "$date", today));
+
+    var paymentRows = await QueryAsync(
+        @"SELECT payment_method,COALESCE(SUM(total),0) total,COUNT(*) count
+          FROM sales WHERE created_at >= $start AND created_at < $end
+          GROUP BY payment_method ORDER BY total DESC",
+        command =>
+        {
+            Add(command, "$start", startUtc);
+            Add(command, "$end", endUtc);
+        });
+
+    var closingRows = await QueryAsync(
+        @"SELECT business_date,total_sales,transaction_count,total_expenses,
+                 closed_by_username,closed_at,notes
+          FROM daily_closings ORDER BY business_date DESC LIMIT 30");
+
+    var todayClosing = closingRows.FirstOrDefault(row =>
+        string.Equals(row["business_date"]?.ToString(), today, StringComparison.Ordinal));
+
+    var totalSales = Convert.ToDouble(sales["total"] ?? 0);
+    var transactionCount = Convert.ToInt32(sales["count"] ?? 0);
+    var totalExpenses = expenses.Sum(row => Convert.ToDouble(row["amount"] ?? 0));
+    var netAfterExpenses = totalSales - totalExpenses;
+    var isClosed = todayClosing is not null;
+
+    var notice = "";
+    if (!string.IsNullOrWhiteSpace(error))
+        notice += $@"<div class='notice danger'>{E(error)}</div>";
+    if (saved)
+        notice += "<div class='notice'>Expense recorded successfully.</div>";
+    if (closedNotice)
+        notice += "<div class='notice'>Today's sales have been closed successfully.</div>";
+    if (reopenedNotice)
+        notice += "<div class='notice'>Today's closing was reopened by the Owner.</div>";
+
+    var paymentLines = paymentRows.Count == 0
+        ? "<p class='muted'>No sales recorded today.</p>"
+        : $"<div class='mini-list'>{string.Join("", paymentRows.Select(row =>
+            $@"<div><span><strong>{E(row["payment_method"])}</strong><small>{row["count"]} transaction(s)</small></span><strong>{Money(row["total"])}</strong></div>"))}</div>";
+
+    var expenseLines = expenses.Count == 0
+        ? "<p class='muted'>No expenses recorded today.</p>"
+        : $"<div class='mini-list'>{string.Join("", expenses.Select(row =>
+            $@"<div><span><strong>{E(row["category"])}</strong><small>{E(row["description"])} · {E(row["recorded_by"])}</small></span><strong>{Money(row["amount"])}</strong></div>"))}</div>";
+
+    var closingSection = isClosed
+        ? $@"<section class='card'>
+            <div class='title'><h2>Day Closed</h2><span>{E(todayClosing!["business_date"])}</span></div>
+            <p>Closed by <strong>{E(todayClosing!["closed_by_username"])}</strong> at {DateText(todayClosing!["closed_at"])}.</p>
+            <p class='muted'>Sales are locked for today. An Owner must reopen the day before another sale can be entered.</p>
+            {(isOwner ? $@"<form method='post' action='/daily-closing/reopen' onsubmit='return confirm(""Reopen today's sales?"")'>
+              <button class='secondary' type='submit'>Reopen Today's Sales</button>
+            </form>" : "")}
+          </section>"
+        : $@"<section class='card'>
+            <div class='title'><h2>Close Today's Sales</h2><span>End of day</span></div>
+            <p class='muted'>Add all expenses spent today before closing. Once closed, employees cannot make more sales until an Owner reopens the day.</p>
+            <form method='post' action='/daily-closing/close' class='form'>
+              <textarea name='notes' rows='3' placeholder='Closing notes (optional)'></textarea>
+              <button class='primary' type='submit' onclick='return confirm(""Close today's sales now? Make sure all expenses have been added."")'>Close Today's Sales</button>
+            </form>
+          </section>";
+
+    var expenseForm = isClosed
+        ? ""
+        : $@"<section class='card'>
+            <div class='title'><h2>Add Today's Expense</h2><span>Recorded by {E(username)}</span></div>
+            <form method='post' action='/daily-closing/expense' class='form form-grid'>
+              <input name='category' value='General' required placeholder='Expense category e.g. Transport'>
+              <input name='amount' type='number' min='0.01' step='0.01' required placeholder='Amount'>
+              <input class='wide' name='description' placeholder='What was the money spent on?'>
+              <button class='primary' type='submit'>Save Expense</button>
+            </form>
+          </section>";
+
+    var history = isOwner
+        ? $@"<section class='card'>
+            <div class='title'><h2>Closing History</h2><span>Latest {closingRows.Count}</span></div>
+            <div class='tablewrap'>
+              <table>
+                <tr><th>Date</th><th>Sales</th><th>Transactions</th><th>Expenses</th><th>Closed By</th><th>Closed At</th></tr>
+                {string.Join("", closingRows.Select(row =>
+                    $@"<tr>
+                      <td>{E(row["business_date"])}</td>
+                      <td>{Money(row["total_sales"])}</td>
+                      <td>{row["transaction_count"]}</td>
+                      <td>{Money(row["total_expenses"])}</td>
+                      <td>{E(row["closed_by_username"])}</td>
+                      <td>{DateText(row["closed_at"])}</td>
+                    </tr>"))}
+              </table>
+            </div>
+          </section>"
+        : "";
+
+    return $@"
+      <div class='head'>
+        <div>
+          <span class='eyebrow'>END OF DAY</span>
+          <h1>Daily Closing</h1>
+          <p>{DateTime.Today:dddd, dd MMMM yyyy} · employee closing and daily expense record.</p>
+        </div>
+      </div>
+
+      {notice}
+
+      <div class='cards'>
+        <div class='card'><span>Today's Sales</span><strong>{Money(totalSales)}</strong><small>{transactionCount} transactions</small></div>
+        <div class='card'><span>Today's Expenses</span><strong>{Money(totalExpenses)}</strong><small>recorded for today</small></div>
+        <div class='card'><span>Net After Expenses</span><strong>{Money(netAfterExpenses)}</strong><small>sales minus expenses</small></div>
+      </div>
+
+      <div class='two'>
+        <section class='card'>
+          <div class='title'><h2>Payment Summary</h2></div>
+          {paymentLines}
+        </section>
+        <section class='card'>
+          <div class='title'><h2>Today's Expenses</h2><span>{expenses.Count} entries</span></div>
+          {expenseLines}
+        </section>
+      </div>
+
+      {expenseForm}
+      {closingSection}
+      {history}";
+
+}
 async Task<string> ExpensesPage()
 {
     var expenses = await QueryAsync(
@@ -1975,6 +2129,16 @@ bool IsSameOriginRequest(HttpContext context)
     return false;
 }
 
+(string StartUtc, string EndUtc) LocalDayUtcRange(DateTime localDate)
+{
+    var start = DateTime.SpecifyKind(localDate.Date, DateTimeKind.Local);
+    var end = start.AddDays(1);
+
+    return (
+        start.ToUniversalTime().ToString("O"),
+        end.ToUniversalTime().ToString("O"));
+}
+
 bool IsSameAuthority(string value, string? expectedHost)
 {
     if (string.IsNullOrWhiteSpace(expectedHost))
@@ -2156,12 +2320,40 @@ CREATE TABLE IF NOT EXISTS expenses(
     description TEXT,
     amount REAL NOT NULL,
     expense_date TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    recorded_by_user_id INTEGER NULL,
+    recorded_by_username TEXT NULL
+);
+
+CREATE TABLE IF NOT EXISTS daily_closings(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    business_date TEXT NOT NULL UNIQUE,
+    closed_by_user_id INTEGER NULL,
+    closed_by_username TEXT NOT NULL,
+    total_sales REAL NOT NULL DEFAULT 0,
+    transaction_count INTEGER NOT NULL DEFAULT 0,
+    total_expenses REAL NOT NULL DEFAULT 0,
+    notes TEXT,
+    closed_at TEXT NOT NULL
 );
 
 INSERT OR IGNORE INTO settings(id,shop_name,phone,address,currency)
 VALUES(1,'Sheehan Lights','','','TSh');";
     command.ExecuteNonQuery();
+
+    if (!ColumnExists(connection, "expenses", "recorded_by_user_id"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE expenses ADD COLUMN recorded_by_user_id INTEGER NULL";
+        alter.ExecuteNonQuery();
+    }
+
+    if (!ColumnExists(connection, "expenses", "recorded_by_username"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE expenses ADD COLUMN recorded_by_username TEXT NULL";
+        alter.ExecuteNonQuery();
+    }
 
     BootstrapAdmin(connection);
 
