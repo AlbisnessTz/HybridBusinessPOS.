@@ -3,7 +3,6 @@ using System.Globalization;
 using System.Net;
 using System.Security.Claims;
 using System.Security.Cryptography;
-using System.Threading.RateLimiting;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
 using Microsoft.AspNetCore.Authorization;
@@ -25,23 +24,12 @@ builder.Services.AddAuthentication(CookieAuthenticationDefaults.AuthenticationSc
     });
 
 builder.Services.AddAuthorization();
-builder.Services.AddRateLimiter(options =>
-{
-    options.AddFixedWindowLimiter("login", limiter =>
-    {
-        limiter.PermitLimit = 5;
-        limiter.Window = TimeSpan.FromMinutes(1);
-        limiter.QueueLimit = 0;
-    });
-});
-
 var app = builder.Build();
 var httpContextAccessor = app.Services.GetRequiredService<IHttpContextAccessor>();
 
 app.UseStaticFiles();
 app.UseAuthentication();
 app.UseAuthorization();
-app.UseRateLimiter();
 
 app.Use(async (context, next) =>
 {
