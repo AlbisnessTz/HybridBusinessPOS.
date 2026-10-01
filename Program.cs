@@ -1191,6 +1191,9 @@ async Task<string> SalesPage()
             <option>Card</option>
             <option>Bank</option>
           </select></label>
+          <label id='paymentReferenceWrap' hidden>Transaction Reference
+            <input id='paymentReference' maxlength='80' placeholder='M-Pesa reference e.g. QWE123ABC'>
+          </label>
           <label>Discount<input id='discount' type='number' min='0' step='0.01' value='0'></label>
         </div>
 
