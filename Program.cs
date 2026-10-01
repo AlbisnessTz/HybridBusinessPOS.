@@ -153,13 +153,22 @@ app.MapPost("/login", async (HttpRequest request, HttpContext context) =>
     var user = await FindUser(username);
 
     if (user is null)
+    {
+        RegisterFailedLoginAttempt(clientKey);
         return Results.Redirect("/login?error=Invalid%20username%20or%20password");
+    }
 
     if (user.LockedUntil.HasValue && user.LockedUntil.Value > DateTimeOffset.UtcNow)
+    {
+        RegisterFailedLoginAttempt(clientKey);
         return Results.Redirect("/login?error=Account%20temporarily%20locked%20after%20too%20many%20failed%20attempts");
+    }
 
     if (!user.Active)
+    {
+        RegisterFailedLoginAttempt(clientKey);
         return Results.Redirect("/login?error=This%20account%20is%20disabled");
+    }
 
     if (!VerifyPassword(password, user.PasswordHash))
     {
@@ -1901,8 +1910,8 @@ void CreateAutomaticBackup()
         connection.Open();
 
         using var command = connection.CreateCommand();
-        command.CommandText = "VACUUM INTO $path";
-        Add(command, "$path", backupPath);
+        var safeBackupPath = backupPath.Replace("'", "''");
+        command.CommandText = $"VACUUM INTO '{safeBackupPath}'";
         command.ExecuteNonQuery();
 
         var backups = new DirectoryInfo(backupDirectory)
