@@ -355,7 +355,7 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
         <p class='muted'>Thank you for shopping with {E(shop.Name)}.</p>
       </section>";
 
-    return Results.Content(Html("Receipt", body, "sales"), "text/html");
+    return Html("Receipt", body, "sales");
 });
 
 app.MapGet("/reports", async () => Html("Reports", await ReportsPage(), "reports"));
@@ -763,7 +763,7 @@ async Task<(string Name, string Phone, string Address, string Currency)> ShopSet
         rows[0]["currency"]?.ToString() ?? "TSh");
 }
 
-string Html(string title, string body, string active)
+IResult Html(string title, string body, string active)
 {
     var nav = $@"
       <a class='{(active == "home" ? "on" : "")}' href='/'>Dashboard</a>
