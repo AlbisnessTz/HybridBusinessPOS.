@@ -2165,4 +2165,14 @@ record CheckoutLine(
     double LineTotal);
 
 
-record LoginAttemptState(DateTimeOffset WindowStart, int Count);
+sealed class LoginAttemptState
+{
+    public DateTimeOffset WindowStart { get; set; }
+    public int Count { get; set; }
+
+    public LoginAttemptState(DateTimeOffset windowStart, int count)
+    {
+        WindowStart = windowStart;
+        Count = count;
+    }
+}
