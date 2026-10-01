@@ -358,6 +358,129 @@ app.MapPost("/customers", async (HttpRequest request) =>
     return Results.Redirect("/customers?saved=1");
 });
 
+app.MapGet("/daily-closing", async () =>
+{
+    return Html("Daily Closing", await DailyClosingPage(), "daily");
+});
+
+app.MapPost("/daily-closing/expense", async (HttpRequest request, HttpContext context) =>
+{
+    if (!context.User.IsInRole("Owner") && !context.User.IsInRole("Employee"))
+        return Results.Forbid();
+
+    var today = DateTime.Today.ToString("yyyy-MM-dd");
+    var closed = await QueryAsync(
+        "SELECT id FROM daily_closings WHERE business_date=$date LIMIT 1",
+        command => Add(command, "$date", today));
+
+    if (closed.Count > 0)
+        return Results.Redirect("/daily-closing?error=Today%20is%20already%20closed");
+
+    var form = await request.ReadFormAsync();
+    var category = string.IsNullOrWhiteSpace(form["category"]) ? "General" : form["category"].ToString().Trim();
+    var description = form["description"].ToString().Trim();
+    var amount = ParseFormMoney(form["amount"]);
+
+    if (amount <= 0)
+        return Results.Redirect("/daily-closing?error=Expense%20amount%20must%20be%20greater%20than%20zero");
+
+    var userId = int.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var parsedId) ? parsedId : 0;
+    var username = context.User.Identity?.Name ?? "User";
+
+    await ExecuteAsync(
+        @"INSERT INTO expenses
+          (category,description,amount,expense_date,created_at,recorded_by_user_id,recorded_by_username)
+          VALUES($category,$description,$amount,$date,$created,$user_id,$username)",
+        command =>
+        {
+            Add(command, "$category", category);
+            Add(command, "$description", description);
+            Add(command, "$amount", amount);
+            Add(command, "$date", today);
+            Add(command, "$created", DateTime.UtcNow.ToString("O"));
+            Add(command, "$user_id", userId > 0 ? userId : DBNull.Value);
+            Add(command, "$username", username);
+        });
+
+    await AuditAsync("Recorded Daily Expense", "Expense", null,
+        $"{today} · {category}: {Money(amount)}{(string.IsNullOrWhiteSpace(description) ? "" : " — " + description)}");
+
+    return Results.Redirect("/daily-closing?saved=1");
+});
+
+app.MapPost("/daily-closing/close", async (HttpRequest request, HttpContext context) =>
+{
+    if (!context.User.IsInRole("Owner") && !context.User.IsInRole("Employee"))
+        return Results.Forbid();
+
+    var today = DateTime.Today.ToString("yyyy-MM-dd");
+    var existing = await QueryAsync(
+        "SELECT id FROM daily_closings WHERE business_date=$date LIMIT 1",
+        command => Add(command, "$date", today));
+
+    if (existing.Count > 0)
+        return Results.Redirect("/daily-closing?error=Today%20is%20already%20closed");
+
+    var (startUtc, endUtc) = LocalDayUtcRange(DateTime.Today);
+
+    var sales = (await QueryAsync(
+        @"SELECT COALESCE(SUM(total),0) total,COUNT(*) count
+          FROM sales WHERE created_at >= $start AND created_at < $end",
+        command =>
+        {
+            Add(command, "$start", startUtc);
+            Add(command, "$end", endUtc);
+        }))[0];
+
+    var expenses = (await QueryAsync(
+        "SELECT COALESCE(SUM(amount),0) total FROM expenses WHERE expense_date=$date",
+        command => Add(command, "$date", today)))[0];
+
+    var totalSales = Convert.ToDouble(sales["total"] ?? 0);
+    var count = Convert.ToInt32(sales["count"] ?? 0);
+    var totalExpenses = Convert.ToDouble(expenses["total"] ?? 0);
+    var userId = int.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var parsedId) ? parsedId : 0;
+    var username = context.User.Identity?.Name ?? "User";
+    var notes = request.Form["notes"].ToString().Trim();
+
+    await ExecuteAsync(
+        @"INSERT INTO daily_closings
+          (business_date,closed_by_user_id,closed_by_username,total_sales,transaction_count,total_expenses,notes,closed_at)
+          VALUES($date,$user_id,$username,$sales,$count,$expenses,$notes,$closed_at)",
+        command =>
+        {
+            Add(command, "$date", today);
+            Add(command, "$user_id", userId > 0 ? userId : DBNull.Value);
+            Add(command, "$username", username);
+            Add(command, "$sales", totalSales);
+            Add(command, "$count", count);
+            Add(command, "$expenses", totalExpenses);
+            Add(command, "$notes", notes);
+            Add(command, "$closed_at", DateTime.UtcNow.ToString("O"));
+        });
+
+    await AuditAsync("Closed Daily Sales", "Daily Closing", null,
+        $"{today} · sales {Money(totalSales)} · transactions {count} · expenses {Money(totalExpenses)}");
+
+    return Results.Redirect("/daily-closing?closed=1");
+});
+
+app.MapPost("/daily-closing/reopen", async (HttpContext context) =>
+{
+    if (!context.User.IsInRole("Owner"))
+        return Results.Forbid();
+
+    var today = DateTime.Today.ToString("yyyy-MM-dd");
+    await ExecuteAsync(
+        "DELETE FROM daily_closings WHERE business_date=$date",
+        command => Add(command, "$date", today));
+
+    await AuditAsync("Reopened Daily Sales", "Daily Closing", null,
+        $"{today} · daily closing reopened by owner");
+
+    return Results.Redirect("/daily-closing?reopened=1");
+});
+
 app.MapGet("/expenses", async (HttpContext context) =>
 {
     if (!context.User.IsInRole("Owner"))
@@ -442,6 +565,14 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
 
     if (input is null || input.Items is null || input.Items.Count == 0)
         return Results.BadRequest(new { message = "Add at least one product." });
+
+    var todayBusinessDate = DateTime.Today.ToString("yyyy-MM-dd");
+    var dailyClosed = await QueryAsync(
+        "SELECT id FROM daily_closings WHERE business_date=$date LIMIT 1",
+        command => Add(command, "$date", todayBusinessDate));
+
+    if (dailyClosed.Count > 0)
+        return Results.BadRequest(new { message = "Today's sales are already closed. Ask the Owner to reopen the day before making another sale." });
 
     await using var connection = new SqliteConnection(ConnectionString());
     await connection.OpenAsync();
@@ -1722,6 +1853,7 @@ IResult Html(string title, string body, string active)
       <a class='{(active == "products" ? "on" : "")}' href='/products'>Products</a>
       <a class='{(active == "customers" ? "on" : "")}' href='/customers'>Customers</a>
       <a class='{(active == "reports" ? "on" : "")}' href='/reports'>Reports</a>
+      <a class='{(active == "daily" ? "on" : "")}' href='/daily-closing'>Daily Closing</a>
       {ownerNav}
       <a class='{(active == "account" ? "on" : "")}' href='/account'>Account</a>
       <a href='/logout'>Logout</a>";
