@@ -439,15 +439,40 @@ app.MapPost("/daily-closing/close", async (HttpRequest request, HttpContext cont
     var totalSales = Convert.ToDouble(sales["total"] ?? 0);
     var count = Convert.ToInt32(sales["count"] ?? 0);
     var totalExpenses = Convert.ToDouble(expenses["total"] ?? 0);
+    var paymentRows = await QueryAsync(
+        @"SELECT payment_method,COALESCE(SUM(total),0) total
+          FROM sales
+          WHERE created_at >= $start AND created_at < $end
+          GROUP BY payment_method",
+        command =>
+        {
+            Add(command, "$start", startUtc);
+            Add(command, "$end", endUtc);
+        });
+
+    var expectedPayments = paymentRows.ToDictionary(
+        row => row["payment_method"]?.ToString() ?? "",
+        row => Convert.ToDouble(row["total"] ?? 0),
+        StringComparer.OrdinalIgnoreCase);
+
+    double Expected(string method)
+        => expectedPayments.TryGetValue(method, out var value) ? value : 0d;
+
+    var closeForm = await request.ReadFormAsync();
+    var actualCash = Math.Max(0, ParseFormMoney(closeForm["actual_cash"]));
+    var actualMpesa = Math.Max(0, ParseFormMoney(closeForm["actual_mpesa"]));
+    var actualCard = Math.Max(0, ParseFormMoney(closeForm["actual_card"]));
+    var actualBank = Math.Max(0, ParseFormMoney(closeForm["actual_bank"]));
+
     var userId = int.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var parsedId) ? parsedId : 0;
     var username = context.User.Identity?.Name ?? "User";
-    var closeForm = await request.ReadFormAsync();
     var notes = closeForm["notes"].ToString().Trim();
 
     await ExecuteAsync(
         @"INSERT INTO daily_closings
-          (business_date,closed_by_user_id,closed_by_username,total_sales,transaction_count,total_expenses,notes,closed_at)
-          VALUES($date,$user_id,$username,$sales,$count,$expenses,$notes,$closed_at)",
+          (business_date,closed_by_user_id,closed_by_username,total_sales,transaction_count,total_expenses,
+           actual_cash,actual_mpesa,actual_card,actual_bank,notes,closed_at)
+          VALUES($date,$user_id,$username,$sales,$count,$expenses,$actual_cash,$actual_mpesa,$actual_card,$actual_bank,$notes,$closed_at)",
         command =>
         {
             Add(command, "$date", today);
@@ -456,6 +481,10 @@ app.MapPost("/daily-closing/close", async (HttpRequest request, HttpContext cont
             Add(command, "$sales", totalSales);
             Add(command, "$count", count);
             Add(command, "$expenses", totalExpenses);
+            Add(command, "$actual_cash", actualCash);
+            Add(command, "$actual_mpesa", actualMpesa);
+            Add(command, "$actual_card", actualCard);
+            Add(command, "$actual_bank", actualBank);
             Add(command, "$notes", notes);
             Add(command, "$closed_at", DateTime.UtcNow.ToString("O"));
         });
