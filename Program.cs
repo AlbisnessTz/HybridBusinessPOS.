@@ -495,6 +495,14 @@ app.MapPost("/expenses", async (HttpRequest request) =>
     if (!request.HttpContext.User.IsInRole("Owner"))
         return Results.Forbid();
 
+    var today = DateTime.Today.ToString("yyyy-MM-dd");
+    var closedRows = await QueryAsync(
+        "SELECT id FROM daily_closings WHERE business_date=$date LIMIT 1",
+        command => Add(command, "$date", today));
+
+    if (closedRows.Count > 0)
+        return Results.Redirect("/expenses?error=Today%20is%20already%20closed");
+
     var form = await request.ReadFormAsync();
     var category = string.IsNullOrWhiteSpace(form["category"])
         ? "General"
@@ -505,15 +513,22 @@ app.MapPost("/expenses", async (HttpRequest request) =>
     if (amount <= 0)
         return Results.BadRequest("Expense amount must be greater than zero.");
 
+    var userId = int.TryParse(request.HttpContext.User.FindFirstValue(ClaimTypes.NameIdentifier), out var parsedId) ? parsedId : 0;
+    var username = request.HttpContext.User.Identity?.Name ?? "Owner";
+
     await ExecuteAsync(
-        "INSERT INTO expenses(category,description,amount,expense_date,created_at) VALUES($category,$description,$amount,$date,$created)",
+        @"INSERT INTO expenses
+          (category,description,amount,expense_date,created_at,recorded_by_user_id,recorded_by_username)
+          VALUES($category,$description,$amount,$date,$created,$user_id,$username)",
         command =>
         {
             Add(command, "$category", category);
             Add(command, "$description", description);
             Add(command, "$amount", amount);
-            Add(command, "$date", DateTime.Now.ToString("yyyy-MM-dd"));
+            Add(command, "$date", today);
             Add(command, "$created", DateTime.UtcNow.ToString("O"));
+            Add(command, "$user_id", userId > 0 ? userId : DBNull.Value);
+            Add(command, "$username", username);
         });
 
     await AuditAsync(
@@ -1403,13 +1418,14 @@ async Task<string> ExpensesPage()
         "SELECT * FROM expenses ORDER BY id DESC LIMIT 100");
 
     var rows = expenses.Count == 0
-        ? "<tr><td colspan='4' class='muted'>No expenses recorded yet.</td></tr>"
+        ? "<tr><td colspan='5' class='muted'>No expenses recorded yet.</td></tr>"
         : string.Join("", expenses.Select(row =>
             $@"<tr>
                 <td>{DateText(row["created_at"])}</td>
                 <td>{E(row["category"])}</td>
                 <td>{E(row["description"])}</td>
                 <td><strong>{Money(row["amount"])}</strong></td>
+                <td>{E(row["recorded_by_username"])}</td>
               </tr>"));
 
     return $@"
@@ -1431,7 +1447,7 @@ async Task<string> ExpensesPage()
         <div class='title'><h2>Recent Expenses</h2></div>
         <div class='tablewrap'>
           <table>
-            <tr><th>Date</th><th>Category</th><th>Description</th><th>Amount</th></tr>
+            <tr><th>Date</th><th>Category</th><th>Description</th><th>Amount</th><th>Recorded By</th></tr>
             {rows}
           </table>
         </div>
