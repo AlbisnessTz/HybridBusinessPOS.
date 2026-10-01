@@ -738,9 +738,8 @@ app.MapGet("/audit", async (HttpContext context) =>
 
 app.MapGet("/reports", async (HttpRequest request) =>
 {
-    if (!request.HttpContext.User.IsInRole("Owner"))
-        return Results.Forbid();
-
+    // Reports are read-only for employees. Owner-only actions remain protected
+    // on their individual POST endpoints.
     return Html("Reports", await ReportsPage(request), "reports");
 });
 
@@ -1084,6 +1083,7 @@ async Task<string> ExpensesPage()
 
 async Task<string> ReportsPage(HttpRequest request)
 {
+    var isOwner = request.HttpContext.User.IsInRole("Owner");
     var period = request.Query["period"].ToString().ToLowerInvariant();
 
     if (period is not ("today" or "week" or "month" or "all"))
@@ -1196,7 +1196,7 @@ async Task<string> ReportsPage(HttpRequest request)
         });
 
     var bodyRows = rows.Count == 0
-        ? "<tr><td colspan='8' class='muted'>No sales recorded for this period.</td></tr>"
+        ? $"<tr><td colspan='{(isOwner ? 8 : 7)}' class='muted'>No sales recorded for this period.</td></tr>"
         : string.Join("", rows.Select(row =>
             $@"<tr>
                 <td><a class='link' href='/receipt/{Uri.EscapeDataString(row["invoice_no"]?.ToString() ?? "")}'>{E(row["invoice_no"])}</a></td>
@@ -1206,17 +1206,21 @@ async Task<string> ReportsPage(HttpRequest request)
                 <td>{E(row["payment_method"])}</td>
                 <td>{Money(row["discount"])}</td>
                 <td><strong>{Money(row["total"])}</strong></td>
-                <td><strong>{Money(row["gross_profit"])}</strong></td>
+                {(isOwner ? $@"<td><strong>{Money(row["gross_profit"])}</strong></td>" : "")}
               </tr>"));
 
-    var shareText =
-        $"SHEEHAN LIGHTS\n{periodLabel} BUSINESS REPORT\n\n" +
-        $"Total Sales: {Money(summary["sales_total"])}\n" +
-        $"Gross Profit: {Money(summary["gross_profit"])}\n" +
-        $"Total Expenses: {Money(totalExpenses)}\n" +
-        $"Net Profit: {Money(netProfit)}\n\n" +
-        $"Report period: {periodLabel}\n" +
-        $"Generated: {DateTime.Now:dd MMM yyyy HH:mm}";
+    var shareText = isOwner
+        ? $"SHEEHAN LIGHTS\n{periodLabel} BUSINESS REPORT\n\n" +
+          $"Total Sales: {Money(summary["sales_total"])}\n" +
+          $"Gross Profit: {Money(summary["gross_profit"])}\n" +
+          $"Total Expenses: {Money(totalExpenses)}\n" +
+          $"Net Profit: {Money(netProfit)}\n\n" +
+          $"Report period: {periodLabel}\n" +
+          $"Generated: {DateTime.Now:dd MMM yyyy HH:mm}"
+        : $"SHEEHAN LIGHTS\n{periodLabel} SALES REPORT\n\n" +
+          $"Total Sales: {Money(summary["sales_total"])}\n\n" +
+          $"Report period: {periodLabel}\n" +
+          $"Generated: {DateTime.Now:dd MMM yyyy HH:mm}";
 
     var whatsappUrl = "https://wa.me/?text=" + WebUtility.UrlEncode(shareText);
 
@@ -1249,16 +1253,16 @@ async Task<string> ReportsPage(HttpRequest request)
 
       <div class='cards'>
         <div class='card'><span>Total Sales</span><strong>{Money(summary["sales_total"])}</strong><small>{E(periodLabel)}</small></div>
-        <div class='card'><span>Gross Profit</span><strong>{Money(summary["gross_profit"])}</strong><small>sales minus product cost</small></div>
+        {(isOwner ? $@"<div class='card'><span>Gross Profit</span><strong>{Money(summary["gross_profit"])}</strong><small>sales minus product cost</small></div>
         <div class='card'><span>Total Expenses</span><strong>{Money(totalExpenses)}</strong><small>recorded shop expenses</small></div>
-        <div class='card'><span>Net Profit</span><strong>{Money(netProfit)}</strong><small>gross profit minus expenses</small></div>
+        <div class='card'><span>Net Profit</span><strong>{Money(netProfit)}</strong><small>gross profit minus expenses</small></div>" : "")}
       </div>
 
       <section class='card'>
-        <div class='title'><h2>Sales History</h2><span>Latest 200 in selected period</span></div>
+        <div class='title'><h2>Sales History</h2><span>Latest 200 in selected period · view only</span></div>
         <div class='tablewrap'>
           <table>
-            <tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Units</th><th>Payment</th><th>Discount</th><th>Total</th><th>Profit</th></tr>
+            <tr><th>Invoice</th><th>Date</th><th>Customer</th><th>Units</th><th>Payment</th><th>Discount</th><th>Total</th>{(isOwner ? "<th>Profit</th>" : "")}</tr>
             {bodyRows}
           </table>
         </div>
@@ -1636,7 +1640,6 @@ IResult Html(string title, string body, string active)
     var ownerNav = isOwner
         ? $@"
       <a class='{(active == "expenses" ? "on" : "")}' href='/expenses'>Expenses</a>
-      <a class='{(active == "reports" ? "on" : "")}' href='/reports'>Reports</a>
       <a class='{(active == "staff" ? "on" : "")}' href='/staff'>Staff</a>
       <a class='{(active == "audit" ? "on" : "")}' href='/audit'>Audit Log</a>
       <a class='{(active == "settings" ? "on" : "")}' href='/settings'>Settings</a>"
@@ -1647,6 +1650,7 @@ IResult Html(string title, string body, string active)
       <a class='{(active == "sales" ? "on" : "")}' href='/sales'>New Sale</a>
       <a class='{(active == "products" ? "on" : "")}' href='/products'>Products</a>
       <a class='{(active == "customers" ? "on" : "")}' href='/customers'>Customers</a>
+      <a class='{(active == "reports" ? "on" : "")}' href='/reports'>Reports</a>
       {ownerNav}
       <a class='{(active == "account" ? "on" : "")}' href='/account'>Account</a>
       <a href='/logout'>Logout</a>";
