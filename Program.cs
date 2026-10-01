@@ -146,7 +146,7 @@ app.MapPost("/login", async (HttpRequest request, HttpContext context) =>
     return string.IsNullOrWhiteSpace(returnUrl) || !returnUrl.StartsWith("/")
         ? Results.Redirect("/")
         : Results.Redirect(returnUrl);
-}).RequireRateLimiting("login");
+});
 
 app.MapGet("/logout", async (HttpContext context) =>
 {
@@ -1285,7 +1285,7 @@ async Task<string> AccountPage(bool forceChange)
     var context = httpContextAccessor.HttpContext;
     var username = context?.User.Identity?.Name ?? "User";
     var error = context?.Request.Query["error"].ToString();
-    var saved = context?.Request.Query["saved"] == "1";
+    var saved = context?.Request.Query["saved"].ToString() == "1";
 
     var notice = saved
         ? "<div class='notice'>Password updated successfully.</div>"
