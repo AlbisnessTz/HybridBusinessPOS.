@@ -820,21 +820,21 @@ async Task<string> ProductsPage(bool isOwner)
         "SELECT * FROM products ORDER BY category,name");
 
     var rows = products.Count == 0
-        ? "<tr><td colspan='7' class='muted'>No products yet.</td></tr>"
+        ? $@"<tr><td colspan='{(isOwner ? 7 : 6)}' class='muted'>No products yet.</td></tr>"
         : string.Join("", products.Select(row =>
             $@"<tr>
                 <td><strong>{E(row["name"])}</strong></td>
                 <td>{E(row["category"])}</td>
                 <td>{E(row["sku"])}</td>
-                <td>{Money(row["buying_price"])}</td>
+                {(isOwner ? $@"<td>{Money(row["buying_price"])}</td>" : "")}
                 <td>{Money(row["selling_price"])}</td>
                 <td><span class='stock {(Convert.ToInt32(row["stock_qty"]) <= Convert.ToInt32(row["low_stock_level"]) ? "low" : "")}'>{row["stock_qty"]}</span></td>
-                <td>
+                {(isOwner ? $@"<td>
                   <form method='post' action='/products/delete' onsubmit='return confirm(""Delete this product?"")'>
                     <input type='hidden' name='id' value='{row["id"]}'>
                     <button class='link danger' type='submit'>Delete</button>
                   </form>
-                </td>
+                </td>" : "")}
               </tr>"));
 
     var options = products.Count == 0
@@ -842,12 +842,8 @@ async Task<string> ProductsPage(bool isOwner)
         : string.Join("", products.Select(row =>
             $"<option value='{row["id"]}'>{E(row["name"])} — stock {row["stock_qty"]}</option>"));
 
-    return $@"
-      <div class='head'>
-        <div><span class='eyebrow'>INVENTORY</span><h1>Products</h1><p>Manage lights, bulbs, sockets, switches and electrical tools.</p></div>
-      </div>
-
-      <div class='two'>
+    var addProduct = isOwner
+        ? @"
         <section class='card'>
           <div class='title'><h2>Add Product</h2></div>
           <form method='post' action='/products' class='form form-grid'>
@@ -860,8 +856,16 @@ async Task<string> ProductsPage(bool isOwner)
             <input name='low_stock_level' type='number' min='1' value='5' placeholder='Low stock level'>
             <button class='primary' type='submit'>Save Product</button>
           </form>
-        </section>
+        </section>"
+        : "";
 
+    return $@"
+      <div class='head'>
+        <div><span class='eyebrow'>INVENTORY</span><h1>Products</h1><p>Manage lights, bulbs, sockets, switches and electrical tools.</p></div>
+      </div>
+
+      <div class='two'>
+        {addProduct}
         <section class='card'>
           <div class='title'><h2>Stock Adjustment</h2></div>
           <form method='post' action='/products/adjust' class='form'>
@@ -880,7 +884,7 @@ async Task<string> ProductsPage(bool isOwner)
         <div class='title'><h2>Product List</h2><span>{products.Count} items</span></div>
         <div class='tablewrap'>
           <table>
-            <tr><th>Product</th><th>Category</th><th>SKU</th><th>Buy</th><th>Sell</th><th>Stock</th><th></th></tr>
+            <tr><th>Product</th><th>Category</th><th>SKU</th>{(isOwner ? "<th>Buy</th>" : "")}<th>Sell</th><th>Stock</th>{(isOwner ? "<th></th>" : "")}</tr>
             {rows}
           </table>
         </div>
