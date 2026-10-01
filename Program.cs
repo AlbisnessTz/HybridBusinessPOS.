@@ -450,14 +450,6 @@ app.MapPost("/daily-closing/close", async (HttpRequest request, HttpContext cont
             Add(command, "$end", endUtc);
         });
 
-    var expectedPayments = paymentRows.ToDictionary(
-        row => row["payment_method"]?.ToString() ?? "",
-        row => Convert.ToDouble(row["total"] ?? 0),
-        StringComparer.OrdinalIgnoreCase);
-
-    double Expected(string method)
-        => expectedPayments.TryGetValue(method, out var value) ? value : 0d;
-
     var closeForm = await request.ReadFormAsync();
     var actualCash = Math.Max(0, ParseFormMoney(closeForm["actual_cash"]));
     var actualMpesa = Math.Max(0, ParseFormMoney(closeForm["actual_mpesa"]));
