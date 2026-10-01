@@ -645,8 +645,8 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
         saleCommand.Transaction = transaction;
         saleCommand.CommandText = @"
             INSERT INTO sales
-            (invoice_no,customer_id,subtotal,discount,total,payment_method,created_at)
-            VALUES($invoice,$customer,$subtotal,$discount,$total,$payment,$created)
+            (invoice_no,customer_id,subtotal,discount,total,payment_method,payment_reference,created_at)
+            VALUES($invoice,$customer,$subtotal,$discount,$total,$payment,$reference,$created)
             RETURNING id";
 
         Add(saleCommand, "$invoice", invoice);
@@ -659,6 +659,9 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
             string.IsNullOrWhiteSpace(input.PaymentMethod)
                 ? "Cash"
                 : input.PaymentMethod);
+        Add(saleCommand, "$reference", string.IsNullOrWhiteSpace(input.PaymentReference)
+            ? DBNull.Value
+            : input.PaymentReference.Trim());
         Add(saleCommand, "$created", DateTime.UtcNow.ToString("O"));
 
         var saleId = Convert.ToInt64(await saleCommand.ExecuteScalarAsync());
@@ -696,7 +699,8 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
             "Completed Sale",
             "Sale",
             (int)saleId,
-            $"Invoice {invoice}; total {Money(total)}; items {lines.Count}; payment {input.PaymentMethod ?? "Cash"}");
+            $"Invoice {invoice}; total {Money(total)}; items {lines.Count}; payment {input.PaymentMethod ?? "Cash"}" +
+            $"{(string.IsNullOrWhiteSpace(input.PaymentReference) ? "" : $"; reference {input.PaymentReference.Trim()}")}");
 
         return Results.Json(new
         {
@@ -718,7 +722,7 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
 app.MapGet("/receipt/{invoice}", async (string invoice) =>
 {
     var rows = await QueryAsync(
-        @"SELECT s.invoice_no,s.subtotal,s.discount,s.total,s.payment_method,s.created_at,
+        @"SELECT s.invoice_no,s.subtotal,s.discount,s.total,s.payment_method,s.payment_reference,s.created_at,
                  COALESCE(c.name,'Walk-in Customer') customer,
                  COALESCE(c.phone,'') customer_phone,
                  p.name product,si.quantity,si.unit_price,si.line_total
@@ -787,6 +791,7 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
           <span>Invoice<strong>{E(first["invoice_no"])}</strong></span>
           <span>Customer<strong>{E(first["customer"])}</strong></span>
           <span>Payment<strong>{E(first["payment_method"])}</strong></span>
+          {(string.IsNullOrWhiteSpace(first["payment_reference"]?.ToString()) ? "" : $@"<span>Reference<strong>{E(first["payment_reference"])}</strong></span>")}
         </div>
 
         <div class='tablewrap'>
@@ -2316,6 +2321,7 @@ CREATE TABLE IF NOT EXISTS sales(
     discount REAL NOT NULL DEFAULT 0,
     total REAL NOT NULL,
     payment_method TEXT NOT NULL,
+    payment_reference TEXT NULL,
     created_at TEXT NOT NULL
 );
 
@@ -2357,6 +2363,13 @@ CREATE TABLE IF NOT EXISTS daily_closings(
 INSERT OR IGNORE INTO settings(id,shop_name,phone,address,currency)
 VALUES(1,'Sheehan Lights','','','TSh');";
     command.ExecuteNonQuery();
+
+    if (!ColumnExists(connection, "sales", "payment_reference"))
+    {
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE sales ADD COLUMN payment_reference TEXT NULL";
+        alter.ExecuteNonQuery();
+    }
 
     if (!ColumnExists(connection, "expenses", "recorded_by_user_id"))
     {
@@ -2499,6 +2512,7 @@ record AppUser(
 record CheckoutRequest(
     int? CustomerId,
     string? PaymentMethod,
+    string? PaymentReference,
     double Discount,
     List<CheckoutItem> Items);
 
