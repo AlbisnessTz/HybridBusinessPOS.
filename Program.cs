@@ -212,12 +212,6 @@ app.MapPost("/login", async (HttpRequest request, HttpContext context) =>
 
     ClearLoginAttempts(clientKey);
 
-    await AuditAsync(
-        "Successful Login",
-        "User",
-        user.Id,
-        $"Successful sign-in for {user.Username}");
-
     var returnUrl = form["returnUrl"].ToString();
     return string.IsNullOrWhiteSpace(returnUrl) || !returnUrl.StartsWith("/")
         ? Results.Redirect("/")
