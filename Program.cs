@@ -170,7 +170,10 @@ app.MapGet("/forbidden", () => Results.Content(
     LoginPage("You do not have permission to access that area."),
     "text/html"));
 
-app.MapGet("/products", async () => Html("Products", await ProductsPage(), "products"));
+app.MapGet("/products", async (HttpContext context) =>
+{
+    return Html("Products", await ProductsPage(context.User.IsInRole("Owner")), "products");
+});
 
 app.MapPost("/products", async (HttpRequest request) =>
     if (!request.HttpContext.User.IsInRole("Owner"))
@@ -267,7 +270,13 @@ app.MapPost("/customers", async (HttpRequest request) =>
     return Results.Redirect("/customers?saved=1");
 });
 
-app.MapGet("/expenses", async () => Html("Expenses", await ExpensesPage(), "expenses"));
+app.MapGet("/expenses", async (HttpContext context) =>
+{
+    if (!context.User.IsInRole("Owner"))
+        return Results.Forbid();
+
+    return Html("Expenses", await ExpensesPage(), "expenses");
+});
 
 app.MapPost("/expenses", async (HttpRequest request) =>
     if (!request.HttpContext.User.IsInRole("Owner"))
@@ -568,6 +577,116 @@ app.MapGet("/receipt/{invoice}", async (string invoice) =>
     return Html("Receipt", body, "sales");
 });
 
+app.MapGet("/account", async (HttpRequest request) =>
+{
+    var forceChange = request.Query["change"] == "1";
+    return Html("Account", await AccountPage(forceChange), "account");
+});
+
+app.MapPost("/account/password", async (HttpRequest request, HttpContext context) =>
+{
+    var form = await request.ReadFormAsync();
+    var currentPassword = form["current_password"].ToString();
+    var newPassword = form["new_password"].ToString();
+    var confirmPassword = form["confirm_password"].ToString();
+
+    if (newPassword.Length < 12 || newPassword != confirmPassword)
+        return Results.Redirect("/account?error=Use%20a%20matching%20password%20of%20at%20least%2012%20characters");
+
+    var userId = int.TryParse(context.User.FindFirstValue(ClaimTypes.NameIdentifier), out var parsedId)
+        ? parsedId
+        : 0;
+
+    var user = await FindUserById(userId);
+    if (user is null || !VerifyPassword(currentPassword, user.PasswordHash))
+        return Results.Redirect("/account?error=Current%20password%20is%20incorrect");
+
+    await ExecuteAsync(
+        "UPDATE users SET password_hash=$hash,must_change_password=0,failed_attempts=0,locked_until=NULL WHERE id=$id",
+        command =>
+        {
+            Add(command, "$hash", HashPassword(newPassword));
+            Add(command, "$id", user.Id);
+        });
+
+    var claims = new List<Claim>
+    {
+        new(ClaimTypes.NameIdentifier, user.Id.ToString()),
+        new(ClaimTypes.Name, user.Username),
+        new(ClaimTypes.Role, user.Role),
+        new("must_change_password", "0")
+    };
+
+    await context.SignInAsync(
+        CookieAuthenticationDefaults.AuthenticationScheme,
+        new ClaimsPrincipal(new ClaimsIdentity(
+            claims,
+            CookieAuthenticationDefaults.AuthenticationScheme)));
+
+    return Results.Redirect("/account?saved=1");
+});
+
+app.MapGet("/staff", async (HttpContext context, HttpRequest request) =>
+{
+    if (!context.User.IsInRole("Owner"))
+        return Results.Forbid();
+
+    return Html("Staff", await StaffPage(request), "staff");
+});
+
+app.MapPost("/staff", async (HttpRequest request) =>
+{
+    if (!request.HttpContext.User.IsInRole("Owner"))
+        return Results.Forbid();
+
+    var form = await request.ReadFormAsync();
+    var username = form["username"].ToString().Trim();
+    var password = form["password"].ToString();
+
+    if (username.Length < 3 || username.Length > 32 || username.Any(char.IsWhiteSpace))
+        return Results.Redirect("/staff?error=Username%20must%20be%203-32%20characters%20without%20spaces");
+
+    if (password.Length < 12)
+        return Results.Redirect("/staff?error=Temporary%20password%20must%20be%20at%20least%2012%20characters");
+
+    if (await FindUser(username) is not null)
+        return Results.Redirect("/staff?error=That%20username%20already%20exists");
+
+    await ExecuteAsync(
+        @"INSERT INTO users
+          (username,password_hash,role,active,must_change_password,failed_attempts,created_at)
+          VALUES($username,$hash,'Employee',1,1,0,$created)",
+        command =>
+        {
+            Add(command, "$username", username);
+            Add(command, "$hash", HashPassword(password));
+            Add(command, "$created", DateTime.UtcNow.ToString("O"));
+        });
+
+    return Results.Redirect("/staff?created=1");
+});
+
+app.MapPost("/staff/toggle", async (HttpRequest request) =>
+{
+    if (!request.HttpContext.User.IsInRole("Owner"))
+        return Results.Forbid();
+
+    var form = await request.ReadFormAsync();
+    var id = ParseFormInt(form["id"]);
+    var currentUserId = int.TryParse(request.HttpContext.User.FindFirstValue(ClaimTypes.NameIdentifier), out var parsedId)
+        ? parsedId
+        : 0;
+
+    if (id <= 0 || id == currentUserId)
+        return Results.BadRequest("Invalid staff action.");
+
+    await ExecuteAsync(
+        "UPDATE users SET active=CASE WHEN active=1 THEN 0 ELSE 1 END WHERE id=$id AND role='Employee'",
+        command => Add(command, "$id", id));
+
+    return Results.Redirect("/staff");
+});
+
 app.MapGet("/reports", async (HttpRequest request) =>
 {
     if (!request.HttpContext.User.IsInRole("Owner"))
@@ -695,7 +814,7 @@ async Task<string> DashboardPage(bool isOwner)
       </section>";
 }
 
-async Task<string> ProductsPage()
+async Task<string> ProductsPage(bool isOwner)
 {
     var products = await QueryAsync(
         "SELECT * FROM products ORDER BY category,name");
@@ -1138,16 +1257,278 @@ async Task<(string Name, string Phone, string Address, string Currency)> ShopSet
         rows[0]["currency"]?.ToString() ?? "TSh");
 }
 
+string LoginPage(string error)
+{
+    var message = string.IsNullOrWhiteSpace(error) ? "" : $@"<div class='notice danger'>{E(error)}</div>";
+
+    return $@"<!doctype html>
+<html lang='en'>
+<head>
+  <meta charset='utf-8'>
+  <meta name='viewport' content='width=device-width,initial-scale=1'>
+  <title>Login · Sheehan Lights</title>
+  <link rel='stylesheet' href='/style.css'>
+</head>
+<body>
+<main class='auth-page'>
+  <section class='card auth-card'>
+    <div class='brand auth-brand'>SHEEHAN <span>LIGHTS</span><small>BUSINESS MANAGER</small></div>
+    <span class='eyebrow'>SECURE ACCESS</span>
+    <h1>Sign in</h1>
+    <p>Authorized Sheehan Lights users only.</p>
+    {message}
+    <form method='post' action='/login' class='form'>
+      <input name='username' autocomplete='username' required placeholder='Username'>
+      <input name='password' type='password' autocomplete='current-password' required placeholder='Password'>
+      <button class='primary' type='submit'>Sign In</button>
+    </form>
+  </section>
+</main>
+</body>
+</html>";
+}
+
+async Task<string> AccountPage(bool forceChange)
+{
+    var context = httpContextAccessor.HttpContext;
+    var username = context?.User.Identity?.Name ?? "User";
+    var error = context?.Request.Query["error"].ToString();
+    var saved = context?.Request.Query["saved"] == "1";
+
+    var notice = saved
+        ? "<div class='notice'>Password updated successfully.</div>"
+        : string.IsNullOrWhiteSpace(error)
+            ? ""
+            : $@"<div class='notice danger'>{E(error)}</div>";
+
+    if (forceChange)
+        notice += "<div class='notice'>For security, change the temporary password before using the system.</div>";
+
+    return $@"
+      <div class='head'>
+        <div><span class='eyebrow'>ACCOUNT SECURITY</span><h1>My Account</h1><p>Signed in as {E(username)}.</p></div>
+      </div>
+      <section class='card'>
+        <h2>Change Password</h2>
+        {notice}
+        <form method='post' action='/account/password' class='form'>
+          <input name='current_password' type='password' autocomplete='current-password' required placeholder='Current password'>
+          <input name='new_password' type='password' autocomplete='new-password' minlength='12' required placeholder='New password (12+ characters)'>
+          <input name='confirm_password' type='password' autocomplete='new-password' minlength='12' required placeholder='Confirm new password'>
+          <button class='primary' type='submit'>Update Password</button>
+        </form>
+      </section>";
+}
+
+async Task<string> StaffPage(HttpRequest request)
+{
+    var rows = await QueryAsync(
+        "SELECT id,username,role,active,must_change_password,created_at FROM users ORDER BY role,username");
+
+    var notice = request.Query["created"] == "1"
+        ? "<div class='notice'>Employee account created. Give the employee the temporary password you entered; they must change it on first login.</div>"
+        : "";
+
+    var error = request.Query["error"].ToString();
+    if (!string.IsNullOrWhiteSpace(error))
+        notice += $@"<div class='notice danger'>{E(error)}</div>";
+
+    var list = rows.Count == 0
+        ? "<p class='muted'>No users found.</p>"
+        : $@"<div class='tablewrap'><table>
+            <tr><th>Username</th><th>Role</th><th>Status</th><th>Password</th><th>Action</th></tr>
+            {string.Join("", rows.Select(row =>
+            $@"<tr>
+                <td><strong>{E(row["username"])}</strong></td>
+                <td>{E(row["role"])}</td>
+                <td>{(Convert.ToInt32(row["active"]) == 1 ? "Active" : "Disabled")}</td>
+                <td>{(Convert.ToInt32(row["must_change_password"]) == 1 ? "Must change" : "Set")}</td>
+                <td>{(row["role"]?.ToString() == "Employee"
+                    ? $@"<form method='post' action='/staff/toggle'><input type='hidden' name='id' value='{row["id"]}'><button class='link' type='submit'>{(Convert.ToInt32(row["active"]) == 1 ? "Disable" : "Enable")}</button></form>"
+                    : "<span class='muted'>Owner</span>")}</td>
+              </tr>"))}
+          </table></div>";
+
+    return $@"
+      <div class='head'>
+        <div><span class='eyebrow'>TEAM ACCESS</span><h1>Staff</h1><p>Owner controls for employee accounts.</p></div>
+      </div>
+
+      <section class='card'>
+        <h2>Create Employee</h2>
+        {notice}
+        <form method='post' action='/staff' class='form form-grid'>
+          <input name='username' required minlength='3' maxlength='32' placeholder='Employee username'>
+          <input name='password' type='password' required minlength='12' placeholder='Temporary password (12+ characters)'>
+          <button class='primary' type='submit'>Create Employee</button>
+        </form>
+      </section>
+
+      <section class='card'>
+        <div class='title'><h2>Accounts</h2><span>{rows.Count} users</span></div>
+        {list}
+      </section>";
+}
+
+record AppUser(
+    int Id,
+    string Username,
+    string PasswordHash,
+    string Role,
+    bool Active,
+    bool MustChangePassword,
+    int FailedAttempts,
+    DateTimeOffset? LockedUntil);
+
+async Task<AppUser?> FindUser(string username)
+{
+    if (string.IsNullOrWhiteSpace(username))
+        return null;
+
+    var rows = await QueryAsync(
+        @"SELECT id,username,password_hash,role,active,must_change_password,failed_attempts,locked_until
+          FROM users WHERE username=$username LIMIT 1",
+        command => Add(command, "$username", username));
+
+    return rows.Count == 0 ? null : UserFromRow(rows[0]);
+}
+
+async Task<AppUser?> FindUserById(int id)
+{
+    if (id <= 0)
+        return null;
+
+    var rows = await QueryAsync(
+        @"SELECT id,username,password_hash,role,active,must_change_password,failed_attempts,locked_until
+          FROM users WHERE id=$id LIMIT 1",
+        command => Add(command, "$id", id));
+
+    return rows.Count == 0 ? null : UserFromRow(rows[0]);
+}
+
+AppUser UserFromRow(Dictionary<string, object?> row)
+{
+    DateTimeOffset? locked = null;
+    if (DateTimeOffset.TryParse(row["locked_until"]?.ToString(), out var parsed))
+        locked = parsed;
+
+    return new AppUser(
+        Convert.ToInt32(row["id"]),
+        row["username"]?.ToString() ?? "",
+        row["password_hash"]?.ToString() ?? "",
+        row["role"]?.ToString() ?? "Employee",
+        Convert.ToInt32(row["active"]) == 1,
+        Convert.ToInt32(row["must_change_password"]) == 1,
+        Convert.ToInt32(row["failed_attempts"]),
+        locked);
+}
+
+string HashPassword(string password)
+{
+    const int iterations = 600_000;
+    var salt = RandomNumberGenerator.GetBytes(16);
+    var hash = Rfc2898DeriveBytes.Pbkdf2(
+        password,
+        salt,
+        iterations,
+        HashAlgorithmName.SHA256,
+        32);
+
+    return "PBKDF2$" + iterations.ToString(CultureInfo.InvariantCulture) + "$"
+        + Convert.ToBase64String(salt) + "$" + Convert.ToBase64String(hash);
+}
+
+bool VerifyPassword(string password, string encoded)
+{
+    try
+    {
+        var parts = encoded.Split('$');
+        if (parts.Length != 4 || parts[0] != "PBKDF2")
+            return false;
+
+        if (!int.TryParse(parts[1], NumberStyles.Integer, CultureInfo.InvariantCulture, out var iterations))
+            return false;
+
+        var salt = Convert.FromBase64String(parts[2]);
+        var expected = Convert.FromBase64String(parts[3]);
+
+        var actual = Rfc2898DeriveBytes.Pbkdf2(
+            password,
+            salt,
+            iterations,
+            HashAlgorithmName.SHA256,
+            expected.Length);
+
+        return CryptographicOperations.FixedTimeEquals(actual, expected);
+    }
+    catch
+    {
+        return false;
+    }
+}
+
+string TemporaryPassword()
+{
+    const string chars = "ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789!@#$%";
+    var result = new char[16];
+
+    for (var i = 0; i < result.Length; i++)
+        result[i] = chars[RandomNumberGenerator.GetInt32(chars.Length)];
+
+    return new string(result);
+}
+
+void BootstrapAdmin(SqliteConnection connection)
+{
+    using var count = connection.CreateCommand();
+    count.CommandText = "SELECT COUNT(*) FROM users";
+    if (Convert.ToInt32(count.ExecuteScalar()) > 0)
+        return;
+
+    var password = TemporaryPassword();
+
+    using var insert = connection.CreateCommand();
+    insert.CommandText = @"
+        INSERT INTO users
+        (username,password_hash,role,active,must_change_password,failed_attempts,created_at)
+        VALUES('owner',$hash,'Owner',1,1,0,$created)";
+
+    Add(insert, "$hash", HashPassword(password));
+    Add(insert, "$created", DateTime.UtcNow.ToString("O"));
+    insert.ExecuteNonQuery();
+
+    Console.WriteLine();
+    Console.WriteLine("==========================================================");
+    Console.WriteLine(" SHEEHAN LIGHTS FIRST OWNER ACCOUNT");
+    Console.WriteLine(" Username : owner");
+    Console.WriteLine($" Temporary password : {password}");
+    Console.WriteLine(" Change this password immediately after first login.");
+    Console.WriteLine("==========================================================");
+    Console.WriteLine();
+}
+
 IResult Html(string title, string body, string active)
 {
+    var context = httpContextAccessor.HttpContext;
+    var isOwner = context?.User.IsInRole("Owner") == true;
+    var username = context?.User.Identity?.Name ?? "User";
+
+    var ownerNav = isOwner
+        ? $@"
+      <a class='{(active == "expenses" ? "on" : "")}' href='/expenses'>Expenses</a>
+      <a class='{(active == "reports" ? "on" : "")}' href='/reports'>Reports</a>
+      <a class='{(active == "staff" ? "on" : "")}' href='/staff'>Staff</a>
+      <a class='{(active == "settings" ? "on" : "")}' href='/settings'>Settings</a>"
+        : "";
+
     var nav = $@"
       <a class='{(active == "home" ? "on" : "")}' href='/'>Dashboard</a>
       <a class='{(active == "sales" ? "on" : "")}' href='/sales'>New Sale</a>
       <a class='{(active == "products" ? "on" : "")}' href='/products'>Products</a>
       <a class='{(active == "customers" ? "on" : "")}' href='/customers'>Customers</a>
-      <a class='{(active == "expenses" ? "on" : "")}' href='/expenses'>Expenses</a>
-      <a class='{(active == "reports" ? "on" : "")}' href='/reports'>Reports</a>
-      <a class='{(active == "settings" ? "on" : "")}' href='/settings'>Settings</a>";
+      {ownerNav}
+      <a class='{(active == "account" ? "on" : "")}' href='/account'>Account</a>
+      <a href='/logout'>Logout</a>";
 
     return Results.Content($@"<!doctype html>
 <html lang='en'>
@@ -1159,14 +1540,18 @@ IResult Html(string title, string body, string active)
 </head>
 <body>
 <header class='topbar'>
-  <div class='brand'>SHEEHAN <span>LIGHTS</span><small>BUSINESS MANAGER</small></div>
+  <div>
+    <div class='brand'>SHEEHAN <span>LIGHTS</span><small>BUSINESS MANAGER</small></div>
+    <div class='muted userbar'>Signed in as {E(username)} · {E(isOwner ? "Owner" : "Employee")}</div>
+  </div>
   <nav>{nav}</nav>
 </header>
 <main>{body}</main>
-<footer>Sheehan Lights · HybridBusinessPOS · Local SQLite</footer>
+<footer>Sheehan Lights · HybridBusinessPOS · Secure local database</footer>
 </body>
 </html>","text/html");
 }
+
 
 async Task ExecuteAsync(string sql, Action<SqliteCommand> bind)
 {
@@ -1262,6 +1647,18 @@ void InitializeDatabase()
 
     using var command = connection.CreateCommand();
     command.CommandText = @"
+CREATE TABLE IF NOT EXISTS users(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('Owner','Employee')),
+    active INTEGER NOT NULL DEFAULT 1,
+    must_change_password INTEGER NOT NULL DEFAULT 1,
+    failed_attempts INTEGER NOT NULL DEFAULT 0,
+    locked_until TEXT NULL,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS settings(
     id INTEGER PRIMARY KEY CHECK(id=1),
     shop_name TEXT NOT NULL,
@@ -1325,6 +1722,8 @@ CREATE TABLE IF NOT EXISTS expenses(
 INSERT OR IGNORE INTO settings(id,shop_name,phone,address,currency)
 VALUES(1,'Sheehan Lights','','','TSh');";
     command.ExecuteNonQuery();
+
+    BootstrapAdmin(connection);
 
     var legacyTables = GetLegacySalesTables(connection);
 
