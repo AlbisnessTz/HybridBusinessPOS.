@@ -1374,16 +1374,6 @@ async Task<string> StaffPage(HttpRequest request)
       </section>";
 }
 
-record AppUser(
-    int Id,
-    string Username,
-    string PasswordHash,
-    string Role,
-    bool Active,
-    bool MustChangePassword,
-    int FailedAttempts,
-    DateTimeOffset? LockedUntil);
-
 async Task<AppUser?> FindUser(string username)
 {
     if (string.IsNullOrWhiteSpace(username))
@@ -1840,6 +1830,16 @@ List<string> GetLegacySalesTables(SqliteConnection connection)
 
     return tables;
 }
+
+record AppUser(
+    int Id,
+    string Username,
+    string PasswordHash,
+    string Role,
+    bool Active,
+    bool MustChangePassword,
+    int FailedAttempts,
+    DateTimeOffset? LockedUntil);
 
 record CheckoutRequest(
     int? CustomerId,
