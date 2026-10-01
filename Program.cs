@@ -193,28 +193,57 @@ app.MapPost("/products", async (HttpRequest request) =>
             Add(command, "$created", DateTime.UtcNow.ToString("O"));
         });
 
+    var createdProductId = (await QueryAsync(
+        "SELECT id FROM products WHERE name=$name ORDER BY id DESC LIMIT 1",
+        command => Add(command, "$name", name)))[0]["id"];
+
+    await AuditAsync(
+        "Created Product",
+        "Product",
+        Convert.ToInt32(createdProductId),
+        $"Created {name} with opening stock {ParseFormInt(form["stock_qty"])}");
+
     return Results.Redirect("/products?saved=1");
 });
 
 app.MapPost("/products/adjust", async (HttpRequest request) =>
 {
+    if (!request.HttpContext.User.IsInRole("Owner"))
+        return Results.Forbid();
+
     var form = await request.ReadFormAsync();
     var productId = ParseFormInt(form["product_id"]);
     var quantity = ParseFormInt(form["quantity"]);
-    var mode = form["mode"].ToString();
+    var mode = form["mode"].ToString().Trim().ToLowerInvariant();
 
-    if (productId <= 0 || quantity <= 0)
+    if (productId <= 0 || quantity <= 0 || (mode != "in" && mode != "out"))
         return Results.BadRequest("Invalid stock adjustment.");
 
+    var productRows = await QueryAsync(
+        "SELECT name,stock_qty FROM products WHERE id=$id",
+        command => Add(command, "$id", productId));
+
+    if (productRows.Count == 0)
+        return Results.NotFound("Product not found.");
+
+    var productName = productRows[0]["name"]?.ToString() ?? "Product";
+    var oldStock = Convert.ToInt32(productRows[0]["stock_qty"]);
     var delta = mode == "out" ? -quantity : quantity;
+    var newStock = Math.Max(0, oldStock + delta);
 
     await ExecuteAsync(
-        "UPDATE products SET stock_qty = MAX(0, stock_qty + $delta) WHERE id = $id",
+        "UPDATE products SET stock_qty = $stock WHERE id = $id",
         command =>
         {
-            Add(command, "$delta", delta);
+            Add(command, "$stock", newStock);
             Add(command, "$id", productId);
         });
+
+    await AuditAsync(
+        "Stock Adjustment",
+        "Product",
+        productId,
+        $"{mode.ToUpperInvariant()} {quantity} units of {productName}; stock {oldStock} -> {newStock}");
 
     return Results.Redirect("/products?stock=1");
 });
@@ -291,6 +320,12 @@ app.MapPost("/expenses", async (HttpRequest request) =>
             Add(command, "$date", DateTime.Now.ToString("yyyy-MM-dd"));
             Add(command, "$created", DateTime.UtcNow.ToString("O"));
         });
+
+    await AuditAsync(
+        "Recorded Expense",
+        "Expense",
+        null,
+        $"{category}: {Money(amount)}{(string.IsNullOrWhiteSpace(description) ? "" : " — " + description)}");
 
     return Results.Redirect("/expenses?saved=1");
 });
@@ -438,6 +473,12 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
         }
 
         await transaction.CommitAsync();
+
+        await AuditAsync(
+            "Completed Sale",
+            "Sale",
+            (int)saleId,
+            $"Invoice {invoice}; total {Money(total)}; items {lines.Count}; payment {input.PaymentMethod ?? "Cash"}");
 
         return Results.Json(new
         {
@@ -651,6 +692,12 @@ app.MapPost("/staff", async (HttpRequest request) =>
             Add(command, "$created", DateTime.UtcNow.ToString("O"));
         });
 
+    await AuditAsync(
+        "Created Employee",
+        "User",
+        null,
+        $"Employee account {username} created");
+
     return Results.Redirect("/staff?created=1");
 });
 
@@ -672,7 +719,21 @@ app.MapPost("/staff/toggle", async (HttpRequest request) =>
         "UPDATE users SET active=CASE WHEN active=1 THEN 0 ELSE 1 END WHERE id=$id AND role='Employee'",
         command => Add(command, "$id", id));
 
+    await AuditAsync(
+        "Toggled Employee",
+        "User",
+        id,
+        $"Employee account status toggled by owner");
+
     return Results.Redirect("/staff");
+});
+
+app.MapGet("/audit", async (HttpContext context) =>
+{
+    if (!context.User.IsInRole("Owner"))
+        return Results.Forbid();
+
+    return Html("Audit Log", await AuditPage(), "audit");
 });
 
 app.MapGet("/reports", async (HttpRequest request) =>
@@ -712,6 +773,12 @@ app.MapPost("/settings", async (HttpRequest request) =>
                     ? "TSh"
                     : form["currency"].ToString().Trim());
         });
+
+    await AuditAsync(
+        "Updated Settings",
+        "Settings",
+        1,
+        $"Shop settings updated; currency {form["currency"]}");
 
     return Results.Redirect("/settings?saved=1");
 });
@@ -854,7 +921,7 @@ async Task<string> ProductsPage(bool isOwner)
 
       <div class='two'>
         {addProduct}
-        <section class='card'>
+        {(isOwner ? $@"        <section class='card'>
           <div class='title'><h2>Stock Adjustment</h2></div>
           <form method='post' action='/products/adjust' class='form'>
             <select name='product_id' required>{options}</select>
@@ -865,7 +932,7 @@ async Task<string> ProductsPage(bool isOwner)
             </select>
             <button class='secondary' type='submit'>Apply Adjustment</button>
           </form>
-        </section>
+        </section>" : "")}
       </div>
 
       <section class='card'>
@@ -1489,6 +1556,77 @@ void BootstrapAdmin(SqliteConnection connection)
     Console.WriteLine();
 }
 
+async Task AuditAsync(string action, string entityType, int? entityId, string details)
+{
+    var context = httpContextAccessor.HttpContext;
+    var userId = int.TryParse(
+        context?.User.FindFirstValue(ClaimTypes.NameIdentifier),
+        out var parsedUserId)
+        ? (object)parsedUserId
+        : DBNull.Value;
+
+    var username = context?.User.Identity?.Name ?? "Unknown";
+    var role = context?.User.FindFirstValue(ClaimTypes.Role) ?? "Unknown";
+    var ip = context?.Connection.RemoteIpAddress?.ToString() ?? "";
+
+    await ExecuteAsync(
+        @"INSERT INTO audit_logs
+          (user_id,username,role,action,entity_type,entity_id,details,ip_address,created_at)
+          VALUES($user_id,$username,$role,$action,$entity_type,$entity_id,$details,$ip,$created)",
+        command =>
+        {
+            Add(command, "$user_id", userId);
+            Add(command, "$username", username);
+            Add(command, "$role", role);
+            Add(command, "$action", action);
+            Add(command, "$entity_type", entityType);
+            Add(command, "$entity_id", entityId.HasValue ? (object)entityId.Value : DBNull.Value);
+            Add(command, "$details", details);
+            Add(command, "$ip", ip);
+            Add(command, "$created", DateTime.UtcNow.ToString("O"));
+        });
+}
+
+async Task<string> AuditPage()
+{
+    var rows = await QueryAsync(@"
+        SELECT created_at,username,role,action,entity_type,entity_id,details,ip_address
+        FROM audit_logs
+        ORDER BY id DESC
+        LIMIT 200");
+
+    var bodyRows = rows.Count == 0
+        ? "<tr><td colspan='8' class='muted'>No audit events have been recorded yet.</td></tr>"
+        : string.Join("", rows.Select(row =>
+            $@"<tr>
+                <td>{DateText(row["created_at"])}</td>
+                <td><strong>{E(row["username"])}</strong></td>
+                <td>{E(row["role"])}</td>
+                <td>{E(row["action"])}</td>
+                <td>{E(row["entity_type"])}{(row["entity_id"] is null ? "" : $" #{row["entity_id"]}")}</td>
+                <td>{E(row["details"])}</td>
+                <td>{E(row["ip_address"])}</td>
+              </tr>"));
+
+    return @"
+      <div class='head'>
+        <div>
+          <span class='eyebrow'>SECURITY</span>
+          <h1>Audit Log</h1>
+          <p>Owner-only history of sensitive business actions.</p>
+        </div>
+      </div>
+
+      <section class='card'>
+        <div class='tablewrap'>
+          <table>
+            <tr><th>Date</th><th>User</th><th>Role</th><th>Action</th><th>Target</th><th>Details</th><th>IP</th></tr>
+            " + bodyRows + @"
+          </table>
+        </div>
+      </section>";
+}
+
 IResult Html(string title, string body, string active)
 {
     var context = httpContextAccessor.HttpContext;
@@ -1500,6 +1638,7 @@ IResult Html(string title, string body, string active)
       <a class='{(active == "expenses" ? "on" : "")}' href='/expenses'>Expenses</a>
       <a class='{(active == "reports" ? "on" : "")}' href='/reports'>Reports</a>
       <a class='{(active == "staff" ? "on" : "")}' href='/staff'>Staff</a>
+      <a class='{(active == "audit" ? "on" : "")}' href='/audit'>Audit Log</a>
       <a class='{(active == "settings" ? "on" : "")}' href='/settings'>Settings</a>"
         : "";
 
@@ -1629,6 +1768,19 @@ void InitializeDatabase()
 
     using var command = connection.CreateCommand();
     command.CommandText = @"
+CREATE TABLE IF NOT EXISTS audit_logs(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NULL,
+    username TEXT NOT NULL,
+    role TEXT NOT NULL,
+    action TEXT NOT NULL,
+    entity_type TEXT,
+    entity_id INTEGER NULL,
+    details TEXT,
+    ip_address TEXT,
+    created_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS users(
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     username TEXT NOT NULL UNIQUE,
