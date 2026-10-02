@@ -1,0 +1,10 @@
+{
+  "name": "Business Manager by AlbisnessTz",
+  "short_name": "Business Manager",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07080d",
+  "theme_color": "#07080d",
+  "description": "Local-first business management and digital proforma system.",
+  "icons": []
+}
