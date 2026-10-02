@@ -2076,13 +2076,16 @@ async Task<string> ProformaPage(int id)
     var first = rows[0];
     var shop = await ShopSettings();
 
+    string DocMoney(object? value)
+        => $"{shop.Currency} " + Convert.ToDecimal(value ?? 0).ToString("N0", CultureInfo.InvariantCulture);
+
     var itemRows = string.Join("", rows
         .Where(row => row["description"] is not null)
         .Select(row => $@"<tr>
             <td>{E(row["quantity"])}</td>
             <td>{E(row["description"])}</td>
-            <td>{Money(row["unit_price"])}</td>
-            <td>{Money(row["line_total"])}</td>
+            <td>{DocMoney(row["unit_price"])}</td>
+            <td>{DocMoney(row["line_total"])}</td>
           </tr>"));
 
     var paymentRows = string.Concat(
@@ -2099,8 +2102,8 @@ async Task<string> ProformaPage(int id)
         $"Customer: {first["customer_name"]}\n\n" +
         string.Join("\n", rows
             .Where(row => row["description"] is not null)
-            .Select(row => $"{row["quantity"]} x {row["description"]} = {Money(row["line_total"])}")) +
-        $"\n\nTOTAL: {Money(first["total"])}\n" +
+            .Select(row => $"{row["quantity"]} x {row["description"]} = {DocMoney(row["line_total"])}")) +
+        $"\n\nTOTAL: {DocMoney(first["total"])}\n" +
         $"{shop.FooterText}";
 
     var request = httpContextAccessor.HttpContext?.Request;
@@ -2159,9 +2162,9 @@ async Task<string> ProformaPage(int id)
           </div>
 
           <div class='proforma-total'>
-            <span>SUBTOTAL <strong>{Money(first["subtotal"])}</strong></span>
-            <span>DISCOUNT <strong>{Money(first["discount"])}</strong></span>
-            <span class='grand'>TOTAL <strong>{Money(first["total"])}</strong></span>
+            <span>SUBTOTAL <strong>{DocMoney(first["subtotal"])}</strong></span>
+            <span>DISCOUNT <strong>{DocMoney(first["discount"])}</strong></span>
+            <span class='grand'>TOTAL <strong>{DocMoney(first["total"])}</strong></span>
           </div>
 
           {(string.IsNullOrWhiteSpace(first["notes"]?.ToString()) ? "" : $@"<div class='proforma-notes'><h3>NOTES</h3><p>{E(first["notes"])}</p></div>")}
