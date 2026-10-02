@@ -720,7 +720,7 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
             await stockCommand.ExecuteNonQueryAsync();
         }
 
-        transaction.Commit();
+        await transaction.CommitAsync();
 
         await AuditAsync(
             "Completed Sale",
@@ -1044,173 +1044,29 @@ app.MapPost("/settings", async (HttpRequest request) =>
 
     var form = await request.ReadFormAsync();
 
-    var currency = string.IsNullOrWhiteSpace(form["currency"])
-        ? "TSh"
-        : form["currency"].ToString().Trim();
-
     await ExecuteAsync(
         @"UPDATE settings
-          SET shop_name=$name,
-              phone=$phone,
-              address=$address,
-              currency=$currency,
-              email=$email,
-              logo_url=$logo_url,
-              slogan=$slogan,
-              bank_name=$bank_name,
-              bank_account_number=$bank_account_number,
-              bank_account_name=$bank_account_name,
-              mobile_money_name=$mobile_money_name,
-              mobile_money_number=$mobile_money_number,
-              invoice_prefix=$invoice_prefix,
-              footer_text=$footer_text
+          SET shop_name=$name,phone=$phone,address=$address,currency=$currency
           WHERE id=1",
         command =>
         {
             Add(command, "$name", form["shop_name"].ToString().Trim());
             Add(command, "$phone", form["phone"].ToString().Trim());
             Add(command, "$address", form["address"].ToString().Trim());
-            Add(command, "$currency", currency);
-            Add(command, "$email", form["email"].ToString().Trim());
-            Add(command, "$logo_url", form["logo_url"].ToString().Trim());
-            Add(command, "$slogan", form["slogan"].ToString().Trim());
-            Add(command, "$bank_name", form["bank_name"].ToString().Trim());
-            Add(command, "$bank_account_number", form["bank_account_number"].ToString().Trim());
-            Add(command, "$bank_account_name", form["bank_account_name"].ToString().Trim());
-            Add(command, "$mobile_money_name", form["mobile_money_name"].ToString().Trim());
-            Add(command, "$mobile_money_number", form["mobile_money_number"].ToString().Trim());
-            Add(command, "$invoice_prefix",
-                string.IsNullOrWhiteSpace(form["invoice_prefix"])
-                    ? "PF-"
-                    : form["invoice_prefix"].ToString().Trim());
-            Add(command, "$footer_text",
-                string.IsNullOrWhiteSpace(form["footer_text"])
-                    ? "Thank you for your business."
-                    : form["footer_text"].ToString().Trim());
+            Add(command, "$currency",
+                string.IsNullOrWhiteSpace(form["currency"])
+                    ? "TSh"
+                    : form["currency"].ToString().Trim());
         });
 
     await AuditAsync(
         "Updated Settings",
         "Settings",
         1,
-        $"Business profile updated; currency {currency}");
+        $"Shop settings updated; currency {form["currency"]}");
 
     return Results.Redirect("/settings?saved=1");
 });
-
-/* First commercial-facing module: configurable, locally stored proformas. */
-app.MapGet("/proforma", async () =>
-    Html("New Proforma", await ProformaCreatePage(), "proforma"));
-
-app.MapPost("/proforma", async (HttpRequest request) =>
-{
-    var form = await request.ReadFormAsync();
-
-    var customerName = form["customer_name"].ToString().Trim();
-    if (string.IsNullOrWhiteSpace(customerName))
-        return Results.BadRequest("Customer name is required.");
-
-    var descriptions = form["item_description"].ToArray();
-    var quantities = form["item_qty"].ToArray();
-    var prices = form["item_price"].ToArray();
-
-    var items = new List<(string Description, int Quantity, double UnitPrice, double LineTotal)>();
-
-    for (var i = 0; i < descriptions.Length; i++)
-    {
-        var description = descriptions[i].Trim();
-        var quantity = i < quantities.Length ? ParseInt(quantities[i], 0) : 0;
-        var unitPrice = i < prices.Length ? ParseMoney(prices[i]) : 0d;
-
-        if (string.IsNullOrWhiteSpace(description))
-            continue;
-
-        if (quantity <= 0 || unitPrice < 0)
-            continue;
-
-        items.Add((description, quantity, unitPrice, quantity * unitPrice));
-    }
-
-    if (items.Count == 0)
-        return Results.BadRequest("Add at least one item with a valid quantity and price.");
-
-    var subtotal = items.Sum(item => item.LineTotal);
-    var discount = Math.Clamp(ParseFormMoney(form["discount"]), 0d, subtotal);
-    var total = subtotal - discount;
-
-    var shop = await ShopSettings();
-    var prefix = string.IsNullOrWhiteSpace(shop.InvoicePrefix) ? "PF-" : shop.InvoicePrefix.Trim();
-    var createdAt = DateTime.UtcNow.ToString("O");
-
-    await using var connection = new SqliteConnection(ConnectionString());
-    await connection.OpenAsync();
-    using var transaction = connection.BeginTransaction();
-
-    int sequence;
-    await using (var nextCommand = connection.CreateCommand())
-    {
-        nextCommand.Transaction = transaction;
-        nextCommand.CommandText = "SELECT COALESCE(MAX(id),0)+1 FROM proformas";
-        sequence = Convert.ToInt32(await nextCommand.ExecuteScalarAsync());
-    }
-
-    var proformaNumber = $"{prefix}{sequence:D4}";
-    long proformaId;
-
-    await using (var insert = connection.CreateCommand())
-    {
-        insert.Transaction = transaction;
-        insert.CommandText = @"
-            INSERT INTO proformas
-            (proforma_no,customer_name,customer_phone,customer_address,notes,subtotal,discount,total,created_at)
-            VALUES($number,$customer,$phone,$address,$notes,$subtotal,$discount,$total,$created)";
-
-        Add(insert, "$number", proformaNumber);
-        Add(insert, "$customer", customerName);
-        Add(insert, "$phone", form["customer_phone"].ToString().Trim());
-        Add(insert, "$address", form["customer_address"].ToString().Trim());
-        Add(insert, "$notes", form["notes"].ToString().Trim());
-        Add(insert, "$subtotal", subtotal);
-        Add(insert, "$discount", discount);
-        Add(insert, "$total", total);
-        Add(insert, "$created", createdAt);
-
-        await insert.ExecuteNonQueryAsync();
-        await using var idCommand = connection.CreateCommand();
-        idCommand.Transaction = transaction;
-        idCommand.CommandText = "SELECT last_insert_rowid()";
-        proformaId = Convert.ToInt64(await idCommand.ExecuteScalarAsync());
-    }
-
-    foreach (var item in items)
-    {
-        await using var itemCommand = connection.CreateCommand();
-        itemCommand.Transaction = transaction;
-        itemCommand.CommandText = @"
-            INSERT INTO proforma_items
-            (proforma_id,description,quantity,unit_price,line_total)
-            VALUES($proforma,$description,$quantity,$unit,$line)";
-
-        Add(itemCommand, "$proforma", proformaId);
-        Add(itemCommand, "$description", item.Description);
-        Add(itemCommand, "$quantity", item.Quantity);
-        Add(itemCommand, "$unit", item.UnitPrice);
-        Add(itemCommand, "$line", item.LineTotal);
-        await itemCommand.ExecuteNonQueryAsync();
-    }
-
-    await transaction.CommitAsync();
-    await AuditAsync(
-        "Created Proforma",
-        "Proforma",
-        Convert.ToInt32(proformaId),
-        $"Proforma {proformaNumber}; customer {customerName}; total {Money(total)}");
-
-    return Results.Redirect($"/proforma/{proformaId}");
-});
-
-app.MapGet("/proforma/{id:int}", async (int id) =>
-    Html("Proforma", await ProformaPage(id), "proforma"));
 
 app.Run();
 
@@ -1906,294 +1762,33 @@ async Task<string> SettingsPage()
 
     return $@"
       <div class='head'>
-        <div><span class='eyebrow'>BUSINESS SETUP</span><h1>Business Profile</h1><p>These settings make the document template reusable for many businesses.</p></div>
+        <div><span class='eyebrow'>BUSINESS SETUP</span><h1>Settings</h1><p>Configure the details shown on the dashboard and receipts.</p></div>
       </div>
 
-      <form method='post' action='/settings'>
-        <section class='card'>
-          <div class='title'><h2>Business identity</h2><span>Branding</span></div>
-          <div class='form form-grid'>
-            <input name='shop_name' value='{E(settings.Name)}' required placeholder='Business name'>
-            <input name='phone' value='{E(settings.Phone)}' placeholder='Phone'>
-            <input name='email' value='{E(settings.Email)}' placeholder='Email'>
-            <input name='currency' value='{E(settings.Currency)}' placeholder='Currency, e.g. TSh'>
-            <input class='wide' name='address' value='{E(settings.Address)}' placeholder='Address'>
-            <input class='wide' name='slogan' value='{E(settings.Slogan)}' placeholder='Slogan / tagline'>
-            <input class='wide' name='logo_url' value='{E(settings.LogoUrl)}' placeholder='Logo image URL (optional)'>
-            <input name='invoice_prefix' value='{E(settings.InvoicePrefix)}' placeholder='Proforma prefix, e.g. WL-'>
-            <input name='footer_text' value='{E(settings.FooterText)}' placeholder='Document footer'>
-          </div>
-        </section>
-
-        <section class='card'>
-          <div class='title'><h2>Payment details</h2><span>Printed on proformas</span></div>
-          <div class='form form-grid'>
-            <input name='bank_name' value='{E(settings.BankName)}' placeholder='Bank name'>
-            <input name='bank_account_number' value='{E(settings.BankAccountNumber)}' placeholder='Account number'>
-            <input name='bank_account_name' value='{E(settings.BankAccountName)}' placeholder='Account name'>
-            <input name='mobile_money_name' value='{E(settings.MobileMoneyName)}' placeholder='Mobile money label'>
-            <input name='mobile_money_number' value='{E(settings.MobileMoneyNumber)}' placeholder='Mobile money number'>
-          </div>
-        </section>
-
-        <button class='primary widebtn' type='submit'>Save Business Settings</button>
-      </form>";
+      <section class='card'>
+        <form method='post' action='/settings' class='form form-grid'>
+          <input name='shop_name' value='{E(settings.Name)}' required placeholder='Shop name'>
+          <input name='phone' value='{E(settings.Phone)}' placeholder='Phone'>
+          <input class='wide' name='address' value='{E(settings.Address)}' placeholder='Address'>
+          <input name='currency' value='{E(settings.Currency)}' placeholder='Currency'>
+          <button class='primary' type='submit'>Save Settings</button>
+        </form>
+      </section>";
 }
 
-async Task<(string Name, string Phone, string Address, string Currency, string Email, string LogoUrl, string Slogan, string BankName, string BankAccountNumber, string BankAccountName, string MobileMoneyName, string MobileMoneyNumber, string InvoicePrefix, string FooterText)> ShopSettings()
+async Task<(string Name, string Phone, string Address, string Currency)> ShopSettings()
 {
     var rows = await QueryAsync(
-        @"SELECT shop_name,phone,address,currency,email,logo_url,slogan,
-                 bank_name,bank_account_number,bank_account_name,
-                 mobile_money_name,mobile_money_number,invoice_prefix,footer_text
-          FROM settings WHERE id=1");
+        "SELECT shop_name,phone,address,currency FROM settings WHERE id=1");
 
     if (rows.Count == 0)
-        return ("Business Name", "", "", "TSh", "", "", "", "", "", "", "", "", "PF-", "Thank you for your business.");
+        return ("Sheehan Lights", "", "", "TSh");
 
     return (
-        rows[0]["shop_name"]?.ToString() ?? "Business Name",
+        rows[0]["shop_name"]?.ToString() ?? "Sheehan Lights",
         rows[0]["phone"]?.ToString() ?? "",
         rows[0]["address"]?.ToString() ?? "",
-        rows[0]["currency"]?.ToString() ?? "TSh",
-        rows[0]["email"]?.ToString() ?? "",
-        rows[0]["logo_url"]?.ToString() ?? "",
-        rows[0]["slogan"]?.ToString() ?? "",
-        rows[0]["bank_name"]?.ToString() ?? "",
-        rows[0]["bank_account_number"]?.ToString() ?? "",
-        rows[0]["bank_account_name"]?.ToString() ?? "",
-        rows[0]["mobile_money_name"]?.ToString() ?? "",
-        rows[0]["mobile_money_number"]?.ToString() ?? "",
-        rows[0]["invoice_prefix"]?.ToString() ?? "PF-",
-        rows[0]["footer_text"]?.ToString() ?? "Thank you for your business.");
-}
-
-
-async Task<string> ProformaCreatePage()
-{
-    var shop = await ShopSettings();
-
-    var rows = string.Join("", Enumerable.Range(0, 6).Select(index => $@"
-      <tr>
-        <td><input name='item_qty' type='number' min='1' value='{(index == 0 ? "1" : "")}' placeholder='Qty'></td>
-        <td><input name='item_description' placeholder='Item / service'></td>
-        <td><input name='item_price' type='number' min='0' step='0.01' placeholder='Unit price'></td>
-        <td class='line-total'>{E(shop.Currency)} 0</td>
-      </tr>"));
-
-    return $@"
-      <div class='head'>
-        <div><span class='eyebrow'>DOCUMENTS</span><h1>New Proforma</h1><p>Create a customer-ready document from your phone or computer.</p></div>
-      </div>
-
-      <form method='post' action='/proforma' id='proformaForm'>
-        <section class='two'>
-          <div class='card'>
-            <div class='title'><h2>Bill to</h2><span>{E(shop.Name)}</span></div>
-            <div class='form'>
-              <input name='customer_name' required placeholder='Customer / company name'>
-              <input name='customer_phone' placeholder='Customer phone'>
-              <input name='customer_address' placeholder='Customer address'>
-              <textarea name='notes' rows='4' placeholder='Notes / terms'></textarea>
-            </div>
-          </div>
-
-          <div class='card'>
-            <div class='title'><h2>Payment</h2><span>Configured in Settings</span></div>
-            <div class='mini-list'>
-              <div><span>Bank<small>{E(shop.BankName)}</small></span><strong>{E(shop.BankAccountNumber)}</strong></div>
-              <div><span>Account name<small>Holder</small></span><strong>{E(shop.BankAccountName)}</strong></div>
-              <div><span>{E(shop.MobileMoneyName)}<small>Mobile payment</small></span><strong>{E(shop.MobileMoneyNumber)}</strong></div>
-            </div>
-            <div class='form' style='margin-top:14px'>
-              <input name='discount' type='number' min='0' step='0.01' value='0' placeholder='Discount'>
-            </div>
-          </div>
-        </section>
-
-        <section class='card'>
-          <div class='title'><h2>Items</h2><span>Automatic totals</span></div>
-          <div class='tablewrap'>
-            <table id='proformaItems'>
-              <tr><th>QTY</th><th>PARTICULARS</th><th>@</th><th>AMOUNT</th></tr>
-              {rows}
-            </table>
-          </div>
-          <div class='pos-total'>
-            <span>Subtotal <strong id='subtotalText'>{E(shop.Currency)} 0</strong></span>
-            <span>Discount <strong id='discountText'>{E(shop.Currency)} 0</strong></span>
-            <span>Total <strong id='totalText'>{E(shop.Currency)} 0</strong></span>
-          </div>
-          <button class='primary widebtn' type='submit'>Create Proforma</button>
-        </section>
-      </form>
-
-      <script>
-        (() => {{
-          const form = document.getElementById('proformaForm');
-          const table = document.getElementById('proformaItems');
-          const itemRows = () => Array.from(table.querySelectorAll('tr')).slice(1);
-          const money = n => new Intl.NumberFormat(undefined, {{ maximumFractionDigits: 0 }}).format(Math.round(n));
-
-          function recalc() {{
-            let subtotal = 0;
-            itemRows().forEach(row => {{
-              const qty = Number(row.querySelector('[name='item_qty']').value || 0);
-              const price = Number(row.querySelector('[name='item_price']').value || 0);
-              const total = qty * price;
-              subtotal += total;
-              row.querySelector('.line-total').textContent = '{E(shop.Currency)} ' + money(total);
-            }});
-
-            const discount = Number(form.querySelector('[name='discount']').value || 0);
-            const safeDiscount = Math.min(Math.max(discount, 0), subtotal);
-            document.getElementById('subtotalText').textContent = '{E(shop.Currency)} ' + money(subtotal);
-            document.getElementById('discountText').textContent = '{E(shop.Currency)} ' + money(safeDiscount);
-            document.getElementById('totalText').textContent = '{E(shop.Currency)} ' + money(subtotal - safeDiscount);
-          }}
-
-          form.addEventListener('input', recalc);
-          recalc();
-        }})();
-      </script>";
-}
-
-async Task<string> ProformaPage(int id)
-{
-    var rows = await QueryAsync(
-        @"SELECT p.proforma_no,p.customer_name,p.customer_phone,p.customer_address,
-                 p.notes,p.subtotal,p.discount,p.total,p.created_at,
-                 i.description,i.quantity,i.unit_price,i.line_total
-          FROM proformas p
-          LEFT JOIN proforma_items i ON i.proforma_id=p.id
-          WHERE p.id=$id
-          ORDER BY i.id",
-        command => Add(command, "$id", id));
-
-    if (rows.Count == 0)
-        return "Proforma not found.";
-
-    var first = rows[0];
-    var shop = await ShopSettings();
-
-    string DocMoney(object? value)
-        => $"{shop.Currency} " + Convert.ToDecimal(value ?? 0).ToString("N0", CultureInfo.InvariantCulture);
-
-    var itemRows = string.Join("", rows
-        .Where(row => row["description"] is not null)
-        .Select(row => $@"<tr>
-            <td>{E(row["quantity"])}</td>
-            <td>{E(row["description"])}</td>
-            <td>{DocMoney(row["unit_price"])}</td>
-            <td>{DocMoney(row["line_total"])}</td>
-          </tr>"));
-
-    var paymentRows = string.Concat(
-        string.IsNullOrWhiteSpace(shop.BankName) ? "" : $@"<div><strong>BANK NAME</strong><span>{E(shop.BankName)}</span></div>",
-        string.IsNullOrWhiteSpace(shop.BankAccountNumber) ? "" : $@"<div><strong>ACCOUNT NUMBER</strong><span>{E(shop.BankAccountNumber)}</span></div>",
-        string.IsNullOrWhiteSpace(shop.BankAccountName) ? "" : $@"<div><strong>ACCOUNT NAME</strong><span>{E(shop.BankAccountName)}</span></div>",
-        string.IsNullOrWhiteSpace(shop.MobileMoneyName) && string.IsNullOrWhiteSpace(shop.MobileMoneyNumber)
-            ? ""
-            : $@"<div><strong>{E(shop.MobileMoneyName)}</strong><span>{E(shop.MobileMoneyNumber)}</span></div>");
-
-    var shareText =
-        $"{shop.Name}\n" +
-        $"PROFORMA INVOICE {first["proforma_no"]}\n" +
-        $"Customer: {first["customer_name"]}\n\n" +
-        string.Join("\n", rows
-            .Where(row => row["description"] is not null)
-            .Select(row => $"{row["quantity"]} x {row["description"]} = {DocMoney(row["line_total"])}")) +
-        $"\n\nTOTAL: {DocMoney(first["total"])}\n" +
-        $"{shop.FooterText}";
-
-    var request = httpContextAccessor.HttpContext?.Request;
-    var publicUrl = request is null
-        ? $"/proforma/{id}"
-        : $"{request.Scheme}://{request.Host}/proforma/{id}";
-    var whatsappUrl = "https://wa.me/?text=" + WebUtility.UrlEncode(shareText + "\n" + publicUrl);
-
-    var logo = string.IsNullOrWhiteSpace(shop.LogoUrl)
-        ? ""
-        : $@"<img class='proforma-logo' src='{E(shop.LogoUrl)}' alt='{E(shop.Name)} logo'>";
-
-    return $@"
-      <section class='proforma-shell'>
-        <div class='actions no-print'>
-          <button class='primary' type='button' onclick='window.print()'>Print / Save PDF</button>
-          <button class='secondary' type='button' onclick='shareProforma()'>Share</button>
-          <a class='secondary' href='{E(whatsappUrl)}' target='_blank' rel='noopener'>WhatsApp</a>
-          <a class='secondary' href='/proforma'>New Proforma</a>
-        </div>
-
-        <article class='proforma-paper'>
-          <div class='proforma-top'>
-            <div class='proforma-brand'>
-              {logo}
-              <h1>{E(shop.Name)}</h1>
-              <p>{E(shop.Slogan)}</p>
-              <p>{E(shop.Address)}</p>
-              <p>{E(shop.Phone)}{(string.IsNullOrWhiteSpace(shop.Email) ? "" : $" · {E(shop.Email)}")}</p>
-            </div>
-            <div class='proforma-title'>
-              <span>PROFORMA INVOICE</span>
-              <small>{E(first["proforma_no"])}</small>
-              <small>{DateText(first["created_at"])}</small>
-            </div>
-          </div>
-
-          <div class='proforma-grid'>
-            <section>
-              <h3>BILL TO</h3>
-              <strong>{E(first["customer_name"])}</strong>
-              <span>{E(first["customer_phone"])}</span>
-              <span>{E(first["customer_address"])}</span>
-            </section>
-            <section>
-              <h3>PAYMENT DETAILS</h3>
-              <div class='payment-grid'>{paymentRows}</div>
-            </section>
-          </div>
-
-          <div class='tablewrap'>
-            <table class='proforma-table'>
-              <tr><th>QTY</th><th>PARTICULARS</th><th>@</th><th>AMOUNT</th></tr>
-              {itemRows}
-            </table>
-          </div>
-
-          <div class='proforma-total'>
-            <span>SUBTOTAL <strong>{DocMoney(first["subtotal"])}</strong></span>
-            <span>DISCOUNT <strong>{DocMoney(first["discount"])}</strong></span>
-            <span class='grand'>TOTAL <strong>{DocMoney(first["total"])}</strong></span>
-          </div>
-
-          {(string.IsNullOrWhiteSpace(first["notes"]?.ToString()) ? "" : $@"<div class='proforma-notes'><h3>NOTES</h3><p>{E(first["notes"])}</p></div>")}
-
-          <div class='proforma-footer'>
-            <strong>{E(shop.FooterText)}</strong>
-            <span>{E(shop.Name)}</span>
-          </div>
-        </article>
-      </section>
-
-      <script>
-        async function shareProforma() {{
-          const url = '{E(publicUrl)}';
-          const text = {System.Text.Json.JsonSerializer.Serialize(shareText)};
-          if (navigator.share) {{
-            try {{
-              await navigator.share({{ title: 'Proforma {E(first["proforma_no"])}', text, url }});
-              return;
-            }} catch {{}}
-          }}
-          try {{
-            await navigator.clipboard.writeText(url);
-            alert('Proforma link copied. Paste it into WhatsApp or another message.');
-          }} catch {{
-            window.prompt('Copy the proforma link:', url);
-          }}
-        }}
-      </script>";
+        rows[0]["currency"]?.ToString() ?? "TSh");
 }
 
 string LoginPage(string error)
@@ -2205,18 +1800,16 @@ string LoginPage(string error)
 <head>
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width,initial-scale=1'>
-  <title>Login · Business Manager</title>
+  <title>Login · Sheehan Lights</title>
   <link rel='stylesheet' href='/style.css'>
-  <link rel='manifest' href='/manifest.json'>
-  <meta name='theme-color' content='#07080d'>
 </head>
 <body>
 <main class='auth-page'>
   <section class='card auth-card'>
-    <div class='brand auth-brand'>BUSINESS <span>MANAGER</span><small>POWERED BY ALBISNESSTZ</small></div>
+    <div class='brand auth-brand'>SHEEHAN <span>LIGHTS</span><small>BUSINESS MANAGER</small></div>
     <span class='eyebrow'>SECURE ACCESS</span>
     <h1>Sign in</h1>
-    <p>Authorized business users only.</p>
+    <p>Authorized Sheehan Lights users only.</p>
     {message}
     <form method='post' action='/login' class='form'>
       <input name='username' autocomplete='username' required placeholder='Username'>
@@ -2535,7 +2128,6 @@ IResult Html(string title, string body, string active)
     var nav = $@"
       <a class='{(active == "home" ? "on" : "")}' href='/'>Dashboard</a>
       <a class='{(active == "sales" ? "on" : "")}' href='/sales'>New Sale</a>
-      <a class='{(active == "proforma" ? "on" : "")}' href='/proforma'>Proforma</a>
       <a class='{(active == "products" ? "on" : "")}' href='/products'>Products</a>
       <a class='{(active == "customers" ? "on" : "")}' href='/customers'>Customers</a>
       <a class='{(active == "reports" ? "on" : "")}' href='/reports'>Reports</a>
@@ -2549,24 +2141,19 @@ IResult Html(string title, string body, string active)
 <head>
   <meta charset='utf-8'>
   <meta name='viewport' content='width=device-width,initial-scale=1'>
-  <title>{E(title)} · Business Manager</title>
+  <title>{E(title)} · Sheehan Lights</title>
   <link rel='stylesheet' href='/style.css'>
 </head>
 <body>
 <header class='topbar'>
   <div>
-    <div class='brand'>BUSINESS <span>MANAGER</span><small>POWERED BY ALBISNESSTZ</small></div>
+    <div class='brand'>SHEEHAN <span>LIGHTS</span><small>BUSINESS MANAGER</small></div>
     <div class='muted userbar'>Signed in as {E(username)} · {E(isOwner ? "Owner" : "Employee")}</div>
   </div>
   <nav>{nav}</nav>
 </header>
 <main>{body}</main>
-<footer>Business Manager · HybridBusinessPOS · Secure local database · AlbisnessTz</footer>
-<script>
-  if ('serviceWorker' in navigator) {{
-    window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
-  }}
-</script>
+<footer>Sheehan Lights · HybridBusinessPOS · Secure local database</footer>
 </body>
 </html>","text/html");
 }
@@ -2805,40 +2392,7 @@ CREATE TABLE IF NOT EXISTS settings(
     shop_name TEXT NOT NULL,
     phone TEXT,
     address TEXT,
-    currency TEXT NOT NULL DEFAULT 'TSh',
-    email TEXT,
-    logo_url TEXT,
-    slogan TEXT,
-    bank_name TEXT,
-    bank_account_number TEXT,
-    bank_account_name TEXT,
-    mobile_money_name TEXT,
-    mobile_money_number TEXT,
-    invoice_prefix TEXT NOT NULL DEFAULT 'PF-',
-    footer_text TEXT NOT NULL DEFAULT 'Thank you for your business.'
-);
-
-CREATE TABLE IF NOT EXISTS proformas(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    proforma_no TEXT NOT NULL UNIQUE,
-    customer_name TEXT NOT NULL,
-    customer_phone TEXT,
-    customer_address TEXT,
-    notes TEXT,
-    subtotal REAL NOT NULL,
-    discount REAL NOT NULL DEFAULT 0,
-    total REAL NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS proforma_items(
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    proforma_id INTEGER NOT NULL,
-    description TEXT NOT NULL,
-    quantity INTEGER NOT NULL,
-    unit_price REAL NOT NULL,
-    line_total REAL NOT NULL,
-    FOREIGN KEY(proforma_id) REFERENCES proformas(id)
+    currency TEXT NOT NULL DEFAULT 'TSh'
 );
 
 CREATE TABLE IF NOT EXISTS products(
@@ -2912,35 +2466,9 @@ CREATE TABLE IF NOT EXISTS daily_closings(
     closed_at TEXT NOT NULL
 );
 
-INSERT OR IGNORE INTO settings
-(id,shop_name,phone,address,currency,email,logo_url,slogan,bank_name,bank_account_number,bank_account_name,mobile_money_name,mobile_money_number,invoice_prefix,footer_text)
-VALUES
-(1,'Sheehan Lights','','','TSh','','','Deals with decorations and light design',
- 'CRDB','','','Tigo Lipa','','WL-','With our company, you are in good hands · Welcome');";
+INSERT OR IGNORE INTO settings(id,shop_name,phone,address,currency)
+VALUES(1,'Sheehan Lights','','','TSh');";
     command.ExecuteNonQuery();
-
-    EnsureColumn(connection, "settings", "email", "TEXT");
-    EnsureColumn(connection, "settings", "logo_url", "TEXT");
-    EnsureColumn(connection, "settings", "slogan", "TEXT");
-    EnsureColumn(connection, "settings", "bank_name", "TEXT");
-    EnsureColumn(connection, "settings", "bank_account_number", "TEXT");
-    EnsureColumn(connection, "settings", "bank_account_name", "TEXT");
-    EnsureColumn(connection, "settings", "mobile_money_name", "TEXT");
-    EnsureColumn(connection, "settings", "mobile_money_number", "TEXT");
-    EnsureColumn(connection, "settings", "invoice_prefix", "TEXT NOT NULL DEFAULT 'PF-'");
-    EnsureColumn(connection, "settings", "footer_text", "TEXT NOT NULL DEFAULT 'Thank you for your business.'");
-
-    using (var settingsDefaults = connection.CreateCommand())
-    {
-        settingsDefaults.CommandText = @"
-            UPDATE settings
-            SET shop_name=CASE WHEN TRIM(COALESCE(shop_name,''))='' THEN 'Sheehan Lights' ELSE shop_name END,
-                currency=CASE WHEN TRIM(COALESCE(currency,''))='' THEN 'TSh' ELSE currency END,
-                invoice_prefix=CASE WHEN TRIM(COALESCE(invoice_prefix,''))='' THEN 'WL-' ELSE invoice_prefix END,
-                footer_text=CASE WHEN TRIM(COALESCE(footer_text,''))='' THEN 'With our company, you are in good hands · Welcome' ELSE footer_text END
-            WHERE id=1";
-        settingsDefaults.ExecuteNonQuery();
-    }
 
     if (!ColumnExists(connection, "sales", "payment_reference"))
     {
@@ -3083,16 +2611,6 @@ bool ColumnExists(SqliteConnection connection, string table, string column)
     }
 
     return false;
-}
-
-void EnsureColumn(SqliteConnection connection, string table, string column, string definition)
-{
-    if (ColumnExists(connection, table, column))
-        return;
-
-    using var alter = connection.CreateCommand();
-    alter.CommandText = $"ALTER TABLE {table} ADD COLUMN {column} {definition}";
-    alter.ExecuteNonQuery();
 }
 
 List<string> GetLegacySalesTables(SqliteConnection connection)
