@@ -2563,9 +2563,9 @@ IResult Html(string title, string body, string active)
 <main>{body}</main>
 <footer>Business Manager · HybridBusinessPOS · Secure local database · AlbisnessTz</footer>
 <script>
-  if ('serviceWorker' in navigator) {
+  if ('serviceWorker' in navigator) {{
     window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
-  }
+  }}
 </script>
 </body>
 </html>","text/html");
