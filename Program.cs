@@ -2204,6 +2204,8 @@ string LoginPage(string error)
   <meta name='viewport' content='width=device-width,initial-scale=1'>
   <title>Login · Business Manager</title>
   <link rel='stylesheet' href='/style.css'>
+  <link rel='manifest' href='/manifest.json'>
+  <meta name='theme-color' content='#07080d'>
 </head>
 <body>
 <main class='auth-page'>
@@ -2557,6 +2559,11 @@ IResult Html(string title, string body, string active)
 </header>
 <main>{body}</main>
 <footer>Business Manager · HybridBusinessPOS · Secure local database · AlbisnessTz</footer>
+<script>
+  if ('serviceWorker' in navigator) {
+    window.addEventListener('load', () => navigator.serviceWorker.register('/service-worker.js'));
+  }
+</script>
 </body>
 </html>","text/html");
 }
