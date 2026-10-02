@@ -42,3 +42,57 @@
 .userbar{margin-top:6px;font-size:11px}
 .notice{padding:12px 14px;border:1px solid var(--line);border-radius:10px;margin:12px 0}
 .notice.danger{border-color:#6d2d2d;background:rgba(180,50,50,.08)}
+
+
+.proforma-shell{width:min(980px,100%);margin:0 auto}
+.proforma-paper{background:#fff;color:#111;border:1px solid #d8d8d8;border-radius:3px;padding:28px;box-shadow:0 18px 50px rgba(0,0,0,.15)}
+.proforma-top{display:flex;justify-content:space-between;gap:24px;padding-bottom:20px;border-bottom:7px solid #264b9b}
+.proforma-brand{max-width:58%}
+.proforma-brand h1{font-size:28px;line-height:1.1;margin:8px 0;color:#111;letter-spacing:-.8px}
+.proforma-brand p{margin:3px 0;color:#555;font-size:12px}
+.proforma-logo{max-width:150px;max-height:70px;object-fit:contain;display:block;margin-bottom:8px}
+.proforma-title{min-width:220px;text-align:right;display:flex;flex-direction:column;gap:5px}
+.proforma-title span{font-size:22px;font-weight:900;letter-spacing:.6px}
+.proforma-title small{color:#555;font-size:11px}
+.proforma-grid{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin:20px 0}
+.proforma-grid>section{border:1px solid #d9d9d9;padding:14px;min-height:110px}
+.proforma-grid h3,.proforma-notes h3{font-size:11px;letter-spacing:1px;margin:0 0 10px;color:#3159a5}
+.proforma-grid section span,.proforma-grid section strong{display:block;font-size:12px;margin-top:4px}
+.payment-grid{display:grid;gap:8px}
+.payment-grid div{display:grid;grid-template-columns:130px 1fr;gap:10px;font-size:11px}
+.payment-grid strong{font-size:10px;color:#666;letter-spacing:.3px}
+.proforma-table{width:100%;border-collapse:collapse;min-width:0}
+.proforma-table th{background:#3159a5;color:#fff;border:1px solid #3159a5}
+.proforma-table td{border:1px solid #999;padding:10px 8px;font-size:12px;color:#111}
+.proforma-table th:first-child,.proforma-table td:first-child{width:80px;text-align:center}
+.proforma-table th:nth-child(3),.proforma-table td:nth-child(3){width:140px}
+.proforma-table th:last-child,.proforma-table td:last-child{width:160px;text-align:right}
+.proforma-total{display:flex;justify-content:flex-end;gap:28px;padding:16px 0;border-top:2px solid #222;margin-top:18px}
+.proforma-total span{font-size:10px;color:#666;display:flex;flex-direction:column;align-items:flex-end}
+.proforma-total strong{font-size:14px;color:#111;margin-top:3px}
+.proforma-total .grand{font-size:11px;color:#111}
+.proforma-total .grand strong{font-size:18px}
+.proforma-notes{border-top:1px solid #ccc;padding-top:14px;margin-top:8px}
+.proforma-notes p{margin:0;font-size:11px;color:#444;white-space:pre-wrap}
+.proforma-footer{display:flex;justify-content:space-between;gap:15px;margin-top:28px;padding-top:15px;border-top:1px solid #ccc;font-size:10px;color:#555}
+.proforma-footer strong{color:#111}
+
+@media(max-width:620px){
+  .proforma-paper{padding:16px}
+  .proforma-top,.proforma-grid{grid-template-columns:1fr;display:grid}
+  .proforma-brand{max-width:none}
+  .proforma-title{text-align:left;min-width:0}
+  .proforma-total{justify-content:flex-start;flex-wrap:wrap}
+  .payment-grid div{grid-template-columns:1fr}
+  .proforma-footer{flex-direction:column}
+}
+
+@media print{
+  @page{size:A4;margin:10mm}
+  body{background:#fff!important}
+  main{width:100%;padding:0}
+  .proforma-shell{width:100%}
+  .proforma-paper{box-shadow:none;border:0;padding:0}
+  .no-print{display:none!important}
+  .topbar,footer{display:none!important}
+}
