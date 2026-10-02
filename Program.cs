@@ -2038,14 +2038,14 @@ async Task<string> ProformaCreatePage()
           function recalc() {{
             let subtotal = 0;
             itemRows().forEach(row => {{
-              const qty = Number(row.querySelector('[name="item_qty"]').value || 0);
-              const price = Number(row.querySelector('[name="item_price"]').value || 0);
+              const qty = Number(row.querySelector('[name='item_qty']').value || 0);
+              const price = Number(row.querySelector('[name='item_price']').value || 0);
               const total = qty * price;
               subtotal += total;
               row.querySelector('.line-total').textContent = '{E(shop.Currency)} ' + money(total);
             }});
 
-            const discount = Number(form.querySelector('[name="discount"]').value || 0);
+            const discount = Number(form.querySelector('[name='discount']').value || 0);
             const safeDiscount = Math.min(Math.max(discount, 0), subtotal);
             document.getElementById('subtotalText').textContent = '{E(shop.Currency)} ' + money(subtotal);
             document.getElementById('discountText').textContent = '{E(shop.Currency)} ' + money(safeDiscount);
