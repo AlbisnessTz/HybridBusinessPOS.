@@ -720,7 +720,7 @@ app.MapPost("/api/checkout", async (HttpRequest request) =>
             await stockCommand.ExecuteNonQueryAsync();
         }
 
-        await transaction.CommitAsync();
+        transaction.Commit();
 
         await AuditAsync(
             "Completed Sale",
@@ -1144,7 +1144,7 @@ app.MapPost("/proforma", async (HttpRequest request) =>
 
     await using var connection = new SqliteConnection(ConnectionString());
     await connection.OpenAsync();
-    await using var transaction = await connection.BeginTransactionAsync();
+    using var transaction = connection.BeginTransaction();
 
     int sequence;
     await using (var nextCommand = connection.CreateCommand())
